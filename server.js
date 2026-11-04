@@ -385,7 +385,8 @@ app.post("/api/posts", ensureReady, requireVerified, upload.single("video"), asy
   let progressStreamStarted = false;
   const sendProgress = (stage, percent, message, extra = {}) => {
     if (!progressStreamStarted || res.destroyed || res.writableEnded) return;
-    res.write(`${JSON.stringify({ type: "progress", stage, percent: Math.max(0, Math.min(100, Math.round(percent))), message, ...extra })}\n`);
+    const type = stage === "complete" ? "complete" : "progress";
+    res.write(`${JSON.stringify({ type, stage, percent: Math.max(0, Math.min(100, Math.round(percent))), message, ...extra })}\n`);
   };
   const startProgressStream = () => {
     if (progressStreamStarted) return;
