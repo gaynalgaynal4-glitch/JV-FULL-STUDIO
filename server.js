@@ -344,11 +344,22 @@ app.post("/api/process/jarvis", ensureReady, requireVerified, upload.single("fil
 app.get("/api/process/jarvis/download/:fileId", ensureReady, requireVerified, async (req, res, next) => {
   try {
     const fileId = String(req.params.fileId || "");
-    if (!/^[a-zA-Z0-9_-]{1,160}$/.test(fileId)) return res.status(400).json({ error: "Invalid Kuronai file ID." });
-    const upstream = await fetch(`${KURONAI_API}/download/${encodeURIComponent(fileId)}`, {
+    if (!/^[a-zA-Z0-9._-]{1,512}$/.test(fileId)) return res.status(400).json({ error: "Invalid Kuronai file ID." });
+    // Kuronai uses tg_id as its server-access credential for file retrieval too.
+    const downloadUrl = new URL(`${KURONAI_API}/download/${encodeURIComponent(fileId)}`);
+    downloadUrl.searchParams.set("tg_id", KURONAI_TG_ID);
+    const upstream = await fetch(downloadUrl, {
+      headers: { "X-TG-ID": KURONAI_TG_ID },
       signal: AbortSignal.timeout(30 * 60 * 1000)
     });
-    if (!upstream.ok) return res.status(upstream.status).json({ error: `Kuronai download failed (HTTP ${upstream.status}).` });
+    if (!upstream.ok) {
+      const detail = (await upstream.text()).slice(0, 1200);
+      console.error("Kuronai download rejected:", upstream.status, detail);
+      return res.status(upstream.status).json({
+        error: `Kuronai download failed (HTTP ${upstream.status}).`,
+        upstream: detail || null
+      });
+    }
     res.setHeader("Content-Type", upstream.headers.get("content-type") || "video/mp4");
     if (upstream.headers.get("content-length")) res.setHeader("Content-Length", upstream.headers.get("content-length"));
     if (upstream.body) Readable.fromWeb(upstream.body).pipe(res); else res.end();
@@ -358,8 +369,13 @@ app.get("/api/process/jarvis/download/:fileId", ensureReady, requireVerified, as
 app.delete("/api/process/jarvis/cleanup/:fileId", ensureReady, requireVerified, async (req, res) => {
   try {
     const fileId = String(req.params.fileId || "");
-    if (!/^[a-zA-Z0-9_-]{1,160}$/.test(fileId)) return res.status(400).json({ error: "Invalid Kuronai file ID." });
-    const upstream = await fetch(`${KURONAI_API}/cleanup/${encodeURIComponent(fileId)}`, { method: "DELETE" });
+    if (!/^[a-zA-Z0-9._-]{1,512}$/.test(fileId)) return res.status(400).json({ error: "Invalid Kuronai file ID." });
+    const cleanupUrl = new URL(`${KURONAI_API}/cleanup/${encodeURIComponent(fileId)}`);
+    cleanupUrl.searchParams.set("tg_id", KURONAI_TG_ID);
+    const upstream = await fetch(cleanupUrl, {
+      method: "DELETE",
+      headers: { "X-TG-ID": KURONAI_TG_ID }
+    });
     res.status(upstream.ok ? 204 : upstream.status).end();
   } catch { res.status(204).end(); }
 });
