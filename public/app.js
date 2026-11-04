@@ -236,11 +236,20 @@ function uploadPostWithProgress(form, onProgress, onServerProgress) {
       for (const raw of lines) {
         const line = raw.trim(); if (!line) continue;
         let item; try { item = JSON.parse(line); } catch { continue; }
-        if (item.type === "progress") onServerProgress?.(item);
-        else if (item.type === "complete") finalResult = item.result || { ok: true, message: item.message };
-        else if (item.type === "error" || item.error) serverError = item.error || "PostZen publishing failed.";
-        // Accept a normal JSON success response as well as the NDJSON progress
-        // protocol. This protects against hosts/proxies that buffer or normalize streams.
+        if (item.type === "progress") {
+          onServerProgress?.(item);
+          // The server's final event may be encoded as a progress event with
+          // stage="complete" and the accepted post result attached.
+          if (item.stage === "complete" && (item.result || item.ok === true || item.post || item.existingPost)) {
+            finalResult = item.result || item;
+          }
+        } else if (item.type === "complete") {
+          finalResult = item.result || { ok: true, message: item.message };
+        } else if (item.type === "error" || item.error) {
+          serverError = item.error || "PostZen publishing failed.";
+        }
+        // Also accept a normal JSON success response if a host/proxy buffers
+        // or normalizes the NDJSON stream.
         else if (item.ok === true || item.post || item.existingPost) finalResult = item.result || item;
       }
     };
