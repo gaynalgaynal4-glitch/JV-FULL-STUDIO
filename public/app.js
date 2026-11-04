@@ -238,7 +238,10 @@ function uploadPostWithProgress(form, onProgress, onServerProgress) {
         let item; try { item = JSON.parse(line); } catch { continue; }
         if (item.type === "progress") onServerProgress?.(item);
         else if (item.type === "complete") finalResult = item.result || { ok: true, message: item.message };
-        else if (item.type === "error") serverError = item.error || "PostZen publishing failed.";
+        else if (item.type === "error" || item.error) serverError = item.error || "PostZen publishing failed.";
+        // Accept a normal JSON success response as well as the NDJSON progress
+        // protocol. This protects against hosts/proxies that buffer or normalize streams.
+        else if (item.ok === true || item.post || item.existingPost) finalResult = item.result || item;
       }
     };
     xhr.open("POST", "/api/posts", true);
@@ -254,7 +257,11 @@ function uploadPostWithProgress(form, onProgress, onServerProgress) {
       else if (serverError) reject(new Error(serverError));
       else {
         let data = {}; try { data = JSON.parse(xhr.responseText || "{}"); } catch {}
-        reject(new Error(data.error || `PostZen upload failed (HTTP ${xhr.status}).`));
+        const contentType = xhr.getResponseHeader("content-type") || "unknown content type";
+        const bodyHint = (xhr.responseText || "").trim().slice(0, 240);
+        reject(new Error(data.error || (xhr.status >= 200 && xhr.status < 300
+          ? `PostZen returned HTTP ${xhr.status}, but no completion event was received (${contentType}). ${bodyHint || "The response body was empty."}`
+          : `PostZen upload failed (HTTP ${xhr.status}). ${bodyHint}`)));
       }
     };
     xhr.onerror = () => reject(new Error("Network error while uploading the processed video to PostZen."));

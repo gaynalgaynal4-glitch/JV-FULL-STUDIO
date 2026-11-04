@@ -1097,7 +1097,16 @@ globalThis.WtmVideoEncoder = Object.freeze({ targetDimensions, reencode });
         if (xhr.status >= 200 && xhr.status < 300) {
           if (!xhr.response || !xhr.response.size) reject(new Error('Jarvis returned an empty output file.'));
           else resolve(xhr.response);
-        } else reject(new Error(`Jarvis download failed (HTTP ${xhr.status}).`));
+        } else {
+          const reader = new FileReader();
+          reader.onload = () => {
+            let detail = '';
+            try { const parsed = JSON.parse(String(reader.result || '{}')); detail = parsed.error || parsed.upstream || ''; } catch (_) {}
+            reject(new Error(detail ? `Jarvis download failed (HTTP ${xhr.status}): ${detail}` : `Jarvis download failed (HTTP ${xhr.status}).`));
+          };
+          reader.onerror = () => reject(new Error(`Jarvis download failed (HTTP ${xhr.status}).`));
+          reader.readAsText(xhr.response);
+        }
       };
       xhr.onerror = () => reject(new Error('The connection was lost while downloading the processed video.'));
       xhr.onabort = () => reject(new Error('The processed video download was interrupted.'));
