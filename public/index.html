@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0b1020">
+  <title>JV Studio — PostZen Publisher</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><div class="brandmark">JV</div><div><b>JV STUDIO</b><small>POSTZEN PUBLISHER</small></div></div>
+      <div class="navlabel">WORKSPACE</div>
+      <a class="nav active" href="#dashboard">▦ <span>Dashboard</span></a>
+      <a class="nav" href="#publish">↗ <span>Create post</span></a>
+      <a class="nav" href="#accounts">◎ <span>Connected accounts</span></a>
+      <div class="sidebottom"><div class="avatar" id="avatar">U</div><div class="usertext"><b id="userEmail">Not signed in</b><small>Personal workspace</small></div><button id="logout" class="iconbtn" title="Sign out">↗</button></div>
+    </aside>
+    <main class="main">
+      <header class="top"><div><div class="eyebrow">SOCIAL PUBLISHING / TIKTOK</div><h1>Publisher dashboard</h1></div><div class="topright"><span class="live"><i></i> SERVER</span><button class="btn secondary" id="connectTop">＋ Connect TikTok</button></div></header>
+      <section id="authPanel" class="authcard">
+        <div class="authcopy"><div class="eyebrow">WELCOME TO JV STUDIO</div><h2>Your content, ready to publish.</h2><p>Sign in or create an account to connect your own TikTok profile and manage your posts.</p></div>
+        <div class="authform"><div class="tabs"><button class="tab selected" data-mode="login">Sign in</button><button class="tab" data-mode="signup">Create account</button></div>
+          <label>Email<input id="email" type="email" autocomplete="email" placeholder="you@example.com"></label>
+          <label>Password<input id="password" type="password" autocomplete="current-password" placeholder="At least 8 characters"></label>
+          <button class="btn primary full" id="authSubmit">Sign in</button><p class="hint" id="authMessage">Use your Supabase Auth account.</p>
+        </div>
+      </section>
+      <div id="appPanel" hidden>
+        <section class="stats">
+          <div class="stat"><span>CONNECTED TIKTOK ACCOUNTS</span><strong id="accountCount">0</strong><small>In your personal PostZen profile</small></div>
+          <div class="stat"><span>POSTS SUBMITTED</span><strong id="postCount">0</strong><small>Saved in your publishing history</small></div>
+          <div class="stat"><span>WORKSPACE</span><strong class="smallvalue" id="workspaceName">My workspace</strong><small>Separate from other users</small></div>
+        </section>
+        <section class="grid">
+          <article class="panel" id="accounts"><div class="panelhead"><div><div class="eyebrow">YOUR CHANNELS</div><h2>Connected accounts</h2></div><button class="btn secondary" id="connectBtn">＋ Connect</button></div><div id="accountList" class="accountlist"><div class="empty">No accounts connected yet.</div></div></article>
+          <article class="panel" id="publish"><div class="panelhead"><div><div class="eyebrow">CONTENT STUDIO</div><h2>Create a TikTok post</h2></div><span class="tag">VIDEO</span></div>
+            <form id="postForm">
+              <label>Publish to<select id="accountSelect" required><option value="">Connect an account first</option></select></label>
+              <label>Video file<div class="drop" id="drop"><input id="video" type="file" accept="video/mp4,video/quicktime,video/webm,video/x-msvideo,video/mpeg,video/x-m4v" hidden><div class="uploadicon">↑</div><b>Drop your video here</b><span>or <button type="button" class="textbtn" id="browse">browse files</button></span><small id="fileName">MP4, MOV, WEBM, AVI · size limit set by server</small></div></label>
+              <label>Caption<textarea id="caption" maxlength="2200" rows="4" placeholder="Write your TikTok caption..."></textarea><small class="counter"><span id="charCount">0</span> / 2,200</small></label>
+              <div class="twocol"><label>Privacy<select id="privacy"><option value="publicToEveryone">Public</option><option value="mutualFollowFriends">Friends</option><option value="selfOnly">Only me</option></select></label><label>Publish<select id="mode"><option value="now">Publish now</option><option value="schedule">Schedule</option><option value="draft">Save as draft</option></select></label></div>
+              <label id="scheduleWrap" hidden>Schedule date and time<input type="datetime-local" id="scheduledFor"></label>
+              <div class="checks"><label class="check"><input type="checkbox" id="comments" checked> Allow comments</label><label class="check"><input type="checkbox" id="aigc"> AI-generated content</label></div>
+              <button class="btn primary full" id="publishBtn" type="submit">Upload & publish video</button><p class="hint" id="publishMessage">Your video is uploaded directly to PostZen storage.</p>
+            </form>
+          </article>
+        </section>
+        <section class="panel history"><div class="panelhead"><div><div class="eyebrow">RECENT ACTIVITY</div><h2>Publishing history</h2></div><button class="btn secondary" id="refresh">Refresh</button></div><div class="tablewrap"><table><thead><tr><th>CAPTION</th><th>MODE</th><th>STATUS</th><th>DATE</th></tr></thead><tbody id="history"><tr><td colspan="4" class="empty">No posts yet.</td></tr></tbody></table></div></section>
+      </div>
+      <footer>JV STUDIO · MULTI-USER PUBLISHING · POWERED BY POSTZEN</footer>
+    </main>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <script src="/app.js"></script>
+</body></html>
