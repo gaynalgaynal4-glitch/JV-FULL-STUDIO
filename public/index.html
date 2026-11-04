@@ -64,8 +64,8 @@
             <select id="mode"><option value="draft">Save as TikTok draft</option><option value="publish">Publish now</option><option value="schedule">Schedule for later</option></select>
             <div id="scheduleWrap" class="hidden"><label class="field-label" for="scheduleTime">Schedule date and time</label><input id="scheduleTime" type="datetime-local"></div>
             <div id="privacyWrap" class="hidden"><label class="field-label" for="privacy">Who can watch?</label><select id="privacy"><option value="publicToEveryone">Everyone</option><option value="mutualFollowFriends">Friends</option><option value="selfOnly">Only you</option></select></div>
-            <button id="publishBtn" class="button primary full" type="submit">Patch video &amp; post to TikTok <span>→</span></button>
-            <div id="workflowProgress" class="workflow-progress hidden" aria-live="polite"><div class="workflow-progress-top"><b id="workflowStatus">Waiting…</b><span id="workflowPercent">0%</span></div><div class="workflow-track"><div id="workflowProgressBar" class="workflow-fill"></div></div><small id="workflowStage">Your selected method will process the video before PostZen uploads it.</small></div>
+            <button id="publishBtn" class="button primary full" type="submit">Upload &amp; post to TikTok <span>→</span></button>
+            <div id="workflowProgress" class="workflow-progress hidden" aria-live="polite"><div class="workflow-progress-top"><b id="workflowStatus">Waiting…</b><span id="workflowPercent">0%</span></div><div class="workflow-track"><div id="workflowProgressBar" class="workflow-fill"></div></div><small id="workflowStage">Only Upload sends the original video unchanged to PostZen. Other methods process it first.</small></div>
             <div id="publishMessage" class="notice hidden"></div>
           </form>
         </section>
@@ -81,11 +81,12 @@
   <div id="methodModal" class="method-modal hidden" role="dialog" aria-modal="true" aria-labelledby="methodModalTitle">
     <section class="method-dialog">
       <div class="method-dialog-head"><div><p class="overline">VIDEO PROCESSING</p><h2 id="methodModalTitle">Choose a method</h2></div><button id="closeMethodModal" class="ghost" type="button" aria-label="Close">✕</button></div>
-      <p class="muted">Choose how your video is patched before it is sent to PostZen for TikTok publishing.</p>
+      <p class="muted">Choose a method. Only Upload sends your original video directly to PostZen without video processing.</p>
       <div class="method-choice-list">
         <button class="method-choice" type="button" data-method="enhanced"><span><b>Enhanced method</b><small>Secure server processing through Kuronai</small></span><i>SERVER · ENHANCED</i></button>
         <button class="method-choice" type="button" data-method="local"><span><b>Local method</b><small>Patch the MP4 in your browser; video stays on this device until publishing</small></span><i>LOCAL · PATCH</i></button>
         <button class="method-choice" type="button" data-method="ffmpeg"><span><b>FFmpeg method</b><small>Native server-side FFmpeg stream-copy remux; no WebAssembly</small></span><i>SERVER · FFmpeg</i></button>
+        <button class="method-choice" type="button" data-method="upload"><span><b>Only Upload</b><small>No video patching, conversion, or enhancement. Send the original video directly to PostZen.</small></span><i>DIRECT · POSTZEN</i></button>
       </div>
       <div id="methodSaveMessage" class="notice hidden"></div>
     </section>

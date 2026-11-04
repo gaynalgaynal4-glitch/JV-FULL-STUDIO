@@ -9,11 +9,11 @@ let identity = null;
 let sessionToken = null;
 let accounts = [];
 let selectedMethod = localStorage.getItem("jv_postzen_processing_method_v1") || "local";
-if (!Object.prototype.hasOwnProperty.call({ enhanced:1, local:1, ffmpeg:1 }, selectedMethod)) selectedMethod = "local";
+if (!Object.prototype.hasOwnProperty.call({ enhanced:1, local:1, ffmpeg:1, upload:1 }, selectedMethod)) selectedMethod = "local";
 let videoLabReady = false;
 let videoLabReadyPromise = null;
 let activeVideoLabJob = null;
-const METHOD_LABELS = { enhanced: "ENHANCED METHOD", local: "LOCAL METHOD", ffmpeg: "FFMPEG METHOD" };
+const METHOD_LABELS = { enhanced: "ENHANCED METHOD", local: "LOCAL METHOD", ffmpeg: "FFMPEG METHOD", upload: "ONLY UPLOAD" };
 
 function browserToken() {
   let token = localStorage.getItem(STORAGE_BROWSER_TOKEN);
@@ -340,7 +340,7 @@ $("publishForm").addEventListener("submit", async event => {
   if (!file) return notice($("publishMessage"), "Choose a video file.", true);
   if (!file.type.startsWith("video/")) return notice($("publishMessage"), "Please select a video file.", true);
   const extension = file.name.split(".").pop().toLowerCase();
-  const supportedForMethod = selectedMethod === "ffmpeg" ? ["mp4", "mov", "m4v"] : ["mp4"];
+  const supportedForMethod = selectedMethod === "ffmpeg" || selectedMethod === "upload" ? ["mp4", "mov", "m4v", "webm", "avi", "mpeg", "mpg"] : ["mp4"];
   if (!supportedForMethod.includes(extension)) return notice($("publishMessage"), `${METHOD_LABELS[selectedMethod]} supports ${supportedForMethod.join(", ").toUpperCase()} files only.`, true);
   if (file.size > config.maxVideoSizeMB * 1024 * 1024) return notice($("publishMessage"), `The video is larger than ${config.maxVideoSizeMB} MB.`, true);
   if (!$("accountSelect").value) return notice($("publishMessage"), "Connect and select a TikTok account first.", true);
@@ -348,23 +348,31 @@ $("publishForm").addEventListener("submit", async event => {
   if (mode === "schedule" && !$("scheduleTime").value) return notice($("publishMessage"), "Choose a schedule date and time.", true);
   const button = $("publishBtn");
   button.disabled = true;
-  button.textContent = "Processing video…";
+  button.textContent = selectedMethod === "upload" ? "Upload & post…" : "Processing video…";
   $("publishMessage").classList.add("hidden");
   try {
-    showWorkflow(`Starting ${METHOD_LABELS[selectedMethod]}…`, 2, "Preparing the original video.");
-    const processed = await processInVideoLab(file, selectedMethod);
-    if (!processed?.blob?.size) throw new Error("The selected method returned an empty processed video.");
-    showWorkflow("Video processing complete", 100, "Preparing the processed file for PostZen.");
+    let videoToUpload = file;
+    let uploadFileName = file.name;
+    if (selectedMethod === "upload") {
+      showWorkflow("Only Upload selected", 5, "No patching, conversion, enhancement, or video processing. Sending the original video to your existing JV server.");
+    } else {
+      showWorkflow(`Starting ${METHOD_LABELS[selectedMethod]}…`, 2, "Preparing the original video.");
+      const processed = await processInVideoLab(file, selectedMethod);
+      if (!processed?.blob?.size) throw new Error("The selected method returned an empty processed video.");
+      videoToUpload = processed.blob;
+      uploadFileName = processed.fileName || file.name.replace(/\.[^.]+$/, "") + "_processed.mp4";
+      showWorkflow("Video processing complete", 100, "Preparing the processed file for PostZen.");
+    }
 
     const form = new FormData();
-    form.append("video", processed.blob, processed.fileName || file.name.replace(/\.[^.]+$/, "") + "_processed.mp4");
+    form.append("video", videoToUpload, uploadFileName);
     form.append("accountId", $("accountSelect").value);
     form.append("caption", $("caption").value);
     form.append("mode", mode);
     form.append("privacyLevel", $("privacy").value);
     if (mode === "schedule") form.append("scheduledFor", new Date($("scheduleTime").value).toISOString());
 
-    showWorkflow("Uploading processed video to PostZen…", 0, "The selected processing method has finished. PostZen media upload is now running.");
+    showWorkflow("Uploading video to PostZen…", 0, selectedMethod === "upload" ? "The original file is being sent unchanged to your existing JV server, then uploaded to PostZen." : "The selected processing method has finished. PostZen media upload is now running.");
     const result = await uploadPostWithProgress(form, pct => showWorkflow(`Uploading to JV PostZen server · ${pct}%`, Math.min(10, pct * 0.10), "Sending the processed MP4 from your browser to JV PostZen."), event => showWorkflow(event.message || "PostZen is processing the upload…", event.stage === "server_receive" ? 10 : 10 + (event.percent ?? 0) * 0.90, event.stage || "PostZen media upload and publishing."));
     showWorkflow("Post submitted successfully", 100, result.message || "PostZen accepted the TikTok post request.");
     notice($("publishMessage"), result.message || "Processed video submitted to PostZen.");
@@ -379,7 +387,7 @@ $("publishForm").addEventListener("submit", async event => {
     notice($("publishMessage"), error.message, true);
   } finally {
     button.disabled = false;
-    button.innerHTML = 'Patch video &amp; post to TikTok <span>→</span>';
+    button.innerHTML = selectedMethod === "upload" ? 'Upload &amp; post to TikTok <span>→</span>' : 'Patch video &amp; post to TikTok <span>→</span>';
   }
 });
 $("refreshHistory").addEventListener("click", loadHistory);
