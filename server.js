@@ -1,35 +1,30 @@
-
 import "dotenv/config";
 import express from "express";
 import helmet from "helmet";
 import multer from "multer";
 import crypto from "node:crypto";
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { Redis } from "@upstash/redis";
 import jwt from "jsonwebtoken";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
-
 const PORT = Number(process.env.PORT || 3000);
 const APP_URL = (process.env.APP_URL || "").replace(/\/$/, "");
-const VERIFY_API = (
-  process.env.JV_VERIFY_API_BASE ||
-  "https://google-colabe-bot.onrender.com"
-).replace(/\/$/, "");
-
+const VERIFY_API = (process.env.JV_VERIFY_API_BASE || "https://google-colabe-bot.onrender.com").replace(/\/$/, "");
 const POSTZEN_KEY = process.env.POSTZEN_API_KEY || "";
 const SESSION_SECRET = process.env.SESSION_SECRET || "";
-const MAX_MB = Math.max(
-  1,
-  Math.min(Number(process.env.MAX_VIDEO_SIZE_MB || 500), 500)
-);
-
+const MAX_MB = Math.max(1, Math.min(Number(process.env.MAX_VIDEO_SIZE_MB || 500), 500));
 const MAX_BYTES = MAX_MB * 1024 * 1024;
 const POSTZEN = "https://api.postzen.dev";
+const KURONAI_API = (process.env.KURONAI_API_BASE || "https://api.kuronaiapp.com").replace(/\/$/, "");
+const KURONAI_TG_ID = process.env.KURONAI_TG_ID || "";
+const KURONAI_MAX_BYTES = 60 * 1024 * 1024;
 
 const required = [
   ["UPSTASH_REDIS_REST_URL", process.env.UPSTASH_REDIS_REST_URL],
@@ -38,304 +33,139 @@ const required = [
   ["APP_URL", APP_URL],
   ["SESSION_SECRET", SESSION_SECRET]
 ];
-
-const missing = required
-  .filter(([, value]) => !value)
-  .map(([name]) => name);
-
+const missing = required.filter(([, value]) => !value).map(([name]) => name);
 let redis = null;
-
-if (
-  process.env.UPSTASH_REDIS_REST_URL &&
-  process.env.UPSTASH_REDIS_REST_TOKEN
-) {
-  try {
-    redis = Redis.fromEnv();
-  } catch (error) {
-    console.error("Upstash setup:", error.message);
-  }
+if (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) {
+  try { redis = Redis.fromEnv(); } catch (error) { console.error("Upstash setup:", error.message); }
 }
 
 app.set("trust proxy", 1);
-
-app.use(
-  helmet({
-    contentSecurityPolicy: {
-      directives: {
-        defaultSrc: ["'self'"],
-        scriptSrc: ["'self'"],
-        styleSrc: ["'self'", "'unsafe-inline'"],
-        imgSrc: ["'self'", "data:", "https:"],
-        connectSrc: ["'self'"],
-        objectSrc: ["'none'"],
-        frameAncestors: ["'none'"]
-      }
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'", "https://cdn.jsdelivr.net"],
+      styleSrc: ["'self'", "'unsafe-inline'"],
+      imgSrc: ["'self'", "data:", "https:"],
+      connectSrc: ["'self'", "https://cdn.jsdelivr.net"],
+      workerSrc: ["'self'", "blob:"],
+      objectSrc: ["'none'"],
+      frameAncestors: ["'none'"]
     }
-  })
-);
-
+  }
+}));
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "public")));
-
-// --------------------------------------------------
-// REDIS KEYS
-// --------------------------------------------------
 
 const userKey = uid => `jvpostzen:user:${uid}`;
 const oauthKey = state => `jvpostzen:oauth:${state}`;
 const postsKey = uid => `jvpostzen:user:${uid}:history`;
 
-// --------------------------------------------------
-// USER IDENTITY
-// --------------------------------------------------
-
 function getIdentity(req) {
   const uid = String(req.get("x-jv-telegram-uid") || "");
-  const browserToken = String(
-    req.get("x-jv-browser-token") || ""
-  );
-
-  if (
-    !/^[0-9]{5,20}$/.test(uid) ||
-    !/^[a-f0-9]{48}$/.test(browserToken)
-  ) {
-    return null;
-  }
-
+  const browserToken = String(req.get("x-jv-browser-token") || "");
+  if (!/^[0-9]{5,20}$/.test(uid) || !/^[a-f0-9]{48}$/.test(browserToken)) return null;
   return { uid, browserToken };
 }
 
 function signedSession(identity) {
   return jwt.sign(
-    {
-      sub: identity.uid,
-      browserToken: identity.browserToken
-    },
+    { sub: identity.uid, browserToken: identity.browserToken },
     SESSION_SECRET,
-    {
-      expiresIn: "12h",
-      issuer: "jv-postzen-existing-bot"
-    }
+    { expiresIn: "12h", issuer: "jv-postzen-existing-bot" }
   );
 }
 
 function getSession(req) {
   const auth = req.get("authorization") || "";
-  const token = auth.startsWith("Bearer ")
-    ? auth.slice(7)
-    : "";
-
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
   if (!token) return null;
-
   try {
-    const payload = jwt.verify(token, SESSION_SECRET, {
-      issuer: "jv-postzen-existing-bot"
-    });
-
-    if (
-      !/^[0-9]{5,20}$/.test(String(payload.sub)) ||
-      !/^[a-f0-9]{48}$/.test(String(payload.browserToken))
-    ) {
-      return null;
-    }
-
-    return {
-      uid: String(payload.sub),
-      browserToken: String(payload.browserToken)
-    };
-  } catch {
-    return null;
-  }
+    const payload = jwt.verify(token, SESSION_SECRET, { issuer: "jv-postzen-existing-bot" });
+    if (!/^[0-9]{5,20}$/.test(String(payload.sub)) || !/^[a-f0-9]{48}$/.test(String(payload.browserToken))) return null;
+    return { uid: String(payload.sub), browserToken: String(payload.browserToken) };
+  } catch { return null; }
 }
 
-// --------------------------------------------------
-// EXISTING JV TELEGRAM BOT VERIFICATION
-// --------------------------------------------------
-
 async function verifyWithExistingJVBot(identity) {
-  const url =
-    `${VERIFY_API}/verify/` +
-    `${encodeURIComponent(identity.uid)}/` +
-    `${encodeURIComponent(identity.browserToken)}`;
-
+  const url = `${VERIFY_API}/verify/${encodeURIComponent(identity.uid)}/${encodeURIComponent(identity.browserToken)}`;
   const response = await fetch(url, {
     method: "GET",
     cache: "no-store",
-    headers: {
-      Accept: "application/json"
-    },
+    headers: { Accept: "application/json" },
     signal: AbortSignal.timeout(10000)
   });
-
   let data;
-
-  try {
-    data = await response.json();
-  } catch {
-    throw new Error(
-      "JV verification service returned an unreadable response."
-    );
-  }
-
+  try { data = await response.json(); } catch { throw new Error("JV verification service returned an unreadable response."); }
   if (!response.ok) {
-    const error = new Error(
-      data.message ||
-      `JV verification service returned HTTP ${response.status}.`
-    );
-
+    const error = new Error(data.message || `JV verification service returned HTTP ${response.status}.`);
     error.status = response.status;
     throw error;
   }
-
   return data;
 }
 
 async function ensureReady(_req, res, next) {
-  if (missing.length) {
-    return res.status(503).json({
-      error: "Server configuration is incomplete.",
-      missing
-    });
-  }
-
-  if (!redis) {
-    return res.status(503).json({
-      error: "Upstash Redis is not configured."
-    });
-  }
-
+  if (missing.length) return res.status(503).json({ error: "Server configuration is incomplete.", missing });
+  if (!redis) return res.status(503).json({ error: "Upstash Redis is not configured." });
   next();
 }
 
 async function requireVerified(req, res, next) {
   try {
     const identity = getSession(req) || getIdentity(req);
-
-    if (!identity) {
-      return res.status(401).json({
-        error: "Enter your Telegram UID and verify through the existing JV bot."
-      });
-    }
-
-    const verification =
-      await verifyWithExistingJVBot(identity);
-
+    if (!identity) return res.status(401).json({ error: "Enter your Telegram UID and verify through the existing JV bot." });
+    const verification = await verifyWithExistingJVBot(identity);
     if (verification.allowed !== true) {
       return res.status(403).json({
-        error: verification.reason ||
-          "JV bot verification failed.",
-        reason: verification.reason ||
-          "verification_failed",
+        error: verification.reason || "JV bot verification failed.",
+        reason: verification.reason || "verification_failed",
         message: verification.message || null
       });
     }
-
     req.identity = identity;
     req.sessionToken = signedSession(identity);
-
     next();
   } catch (error) {
-    console.error(
-      "JV verification failed:",
-      error.message
-    );
-
-    res.status(error.status || 502).json({
-      error:
-        error.message ||
-        "Could not reach the JV verification service."
-    });
+    console.error("JV verification failed:", error.message);
+    res.status(error.status || 502).json({ error: error.message || "Could not reach the JV verification service." });
   }
 }
 
-// --------------------------------------------------
-// POSTZEN API
-// --------------------------------------------------
-
 async function postzen(pathname, options = {}) {
-  const response = await fetch(
-    `${POSTZEN}${pathname}`,
-    {
-      ...options,
-      headers: {
-        Authorization: `Bearer ${POSTZEN_KEY}`,
-        ...(options.body
-          ? { "Content-Type": "application/json" }
-          : {}),
-        ...(options.headers || {})
-      }
+  const response = await fetch(`${POSTZEN}${pathname}`, {
+    ...options,
+    headers: {
+      Authorization: `Bearer ${POSTZEN_KEY}`,
+      ...(options.body ? { "Content-Type": "application/json" } : {}),
+      ...(options.headers || {})
     }
-  );
-
+  });
   const raw = await response.text();
-
   let data;
-
-  try {
-    data = raw ? JSON.parse(raw) : {};
-  } catch {
-    data = { raw };
-  }
-
+  try { data = raw ? JSON.parse(raw) : {}; } catch { data = { raw }; }
   if (!response.ok) {
-    const error = new Error(
-      data.error ||
-      `PostZen API returned HTTP ${response.status}.`
-    );
-
+    const error = new Error(data.error || `PostZen API returned HTTP ${response.status}.`);
     error.status = response.status;
     error.details = data;
-
     throw error;
   }
-
   return data;
 }
 
-// --------------------------------------------------
-// USER POSTZEN PROFILE
-// --------------------------------------------------
-
 async function ensureUser(uid) {
   let record = await redis.get(userKey(uid));
-
-  if (record?.postzenProfileId) {
-    return record;
-  }
-
+  if (record?.postzenProfileId) return record;
   const created = await postzen("/v1/profiles", {
     method: "POST",
-    body: JSON.stringify({
-      name: `JV User ${uid}`
-    })
+    body: JSON.stringify({ name: `JV User ${uid}` })
   });
-
-  const profileId =
-    created.profile?._id ||
-    created.profile?.id ||
-    created._id ||
-    created.profileId;
-
-  if (!profileId) {
-    throw new Error(
-      "PostZen did not return a profile ID when creating the user's workspace."
-    );
-  }
-
-  record = {
-    telegramId: uid,
-    postzenProfileId: profileId,
-    createdAt: new Date().toISOString()
-  };
-
+  const profileId = created.profile?._id || created.profile?.id || created._id || created.profileId;
+  if (!profileId) throw new Error("PostZen did not return a profile ID when creating the user's workspace.");
+  record = { telegramId: uid, postzenProfileId: profileId, createdAt: new Date().toISOString() };
   await redis.set(userKey(uid), record);
-
   return record;
 }
-
-// --------------------------------------------------
-// CONFIGURATION
-// --------------------------------------------------
 
 app.get("/api/config", (_req, res) => {
   res.json({
@@ -346,548 +176,299 @@ app.get("/api/config", (_req, res) => {
   });
 });
 
-// --------------------------------------------------
-// AUTHENTICATION
-// --------------------------------------------------
+app.post("/api/auth/verify", ensureReady, requireVerified, async (req, res, next) => {
+  try {
+    const record = await ensureUser(req.identity.uid);
+    res.json({
+      ok: true,
+      uid: req.identity.uid,
+      sessionToken: req.sessionToken,
+      profileReady: Boolean(record.postzenProfileId)
+    });
+  } catch (error) { next(error); }
+});
 
-app.post(
-  "/api/auth/verify",
-  ensureReady,
-  requireVerified,
-  async (req, res, next) => {
-    try {
-      const record = await ensureUser(req.identity.uid);
+app.get("/api/me", ensureReady, requireVerified, async (req, res, next) => {
+  try {
+    const record = await ensureUser(req.identity.uid);
+    res.json({ uid: req.identity.uid, profileReady: Boolean(record.postzenProfileId) });
+  } catch (error) { next(error); }
+});
 
-      res.json({
-        ok: true,
-        uid: req.identity.uid,
-        sessionToken: req.sessionToken,
-        profileReady: Boolean(record.postzenProfileId)
-      });
-    } catch (error) {
-      next(error);
-    }
+app.post("/api/connect/tiktok", ensureReady, requireVerified, async (req, res, next) => {
+  try {
+    const record = await ensureUser(req.identity.uid);
+    const redirectUrl = `${APP_URL}/oauth/postzen`;
+    const result = await postzen(`/v1/connect/tiktok?profileId=${encodeURIComponent(record.postzenProfileId)}&redirectUrl=${encodeURIComponent(redirectUrl)}`);
+    const authUrl = result.authUrl || result.url || result.connectUrl;
+    const state = result.state;
+    if (!authUrl || !state) throw new Error("PostZen did not return the TikTok authorization URL and state.");
+    await redis.set(oauthKey(String(state)), {
+      telegramId: req.identity.uid,
+      profileId: record.postzenProfileId
+    }, { ex: 600 });
+    res.json({ authUrl });
+  } catch (error) { next(error); }
+});
+
+app.get("/oauth/postzen", ensureReady, async (req, res) => {
+  try {
+    const { code, state, error } = req.query;
+    if (error || !code || !state) return res.redirect("/?connect=cancelled");
+    const stateRecord = await redis.get(oauthKey(String(state)));
+    if (!stateRecord?.profileId || !stateRecord?.telegramId) return res.redirect("/?connect=expired");
+    await postzen("/v1/connect/tiktok", {
+      method: "POST",
+      body: JSON.stringify({
+        code: String(code),
+        state: String(state),
+        profileId: stateRecord.profileId
+      })
+    });
+    await redis.del(oauthKey(String(state)));
+    res.redirect("/?connect=success");
+  } catch (error) {
+    console.error("PostZen OAuth callback:", error.details || error.message);
+    res.redirect("/?connect=failed");
   }
-);
+});
 
-app.get(
-  "/api/me",
-  ensureReady,
-  requireVerified,
-  async (req, res, next) => {
-    try {
-      const record = await ensureUser(req.identity.uid);
-
-      res.json({
-        uid: req.identity.uid,
-        profileReady: Boolean(record.postzenProfileId)
-      });
-    } catch (error) {
-      next(error);
-    }
-  }
-);
-
-// --------------------------------------------------
-// TIKTOK OAUTH CONNECTION
-// --------------------------------------------------
-
-app.post(
-  "/api/connect/tiktok",
-  ensureReady,
-  requireVerified,
-  async (req, res, next) => {
-    try {
-      const record = await ensureUser(req.identity.uid);
-
-      const redirectUrl = `${APP_URL}/oauth/postzen`;
-
-      const result = await postzen(
-        `/v1/connect/tiktok?profileId=${encodeURIComponent(
-          record.postzenProfileId
-        )}&redirectUrl=${encodeURIComponent(redirectUrl)}`
-      );
-
-      const authUrl =
-        result.authUrl ||
-        result.url ||
-        result.connectUrl;
-
-      const state = result.state;
-
-      if (!authUrl || !state) {
-        throw new Error(
-          "PostZen did not return the TikTok authorization URL and state."
-        );
-      }
-
-      await redis.set(
-        oauthKey(String(state)),
-        {
-          telegramId: req.identity.uid,
-          profileId: record.postzenProfileId
-        },
-        { ex: 600 }
-      );
-
-      res.json({ authUrl });
-    } catch (error) {
-      next(error);
-    }
-  }
-);
-
-// --------------------------------------------------
-// POSTZEN OAUTH CALLBACK
-// --------------------------------------------------
-
-app.get(
-  "/oauth/postzen",
-  ensureReady,
-  async (req, res) => {
-    try {
-      const { code, state, error } = req.query;
-
-      if (error || !code || !state) {
-        return res.redirect("/?connect=cancelled");
-      }
-
-      const stateRecord = await redis.get(
-        oauthKey(String(state))
-      );
-
-      if (
-        !stateRecord?.profileId ||
-        !stateRecord?.telegramId
-      ) {
-        return res.redirect("/?connect=expired");
-      }
-
-      await postzen("/v1/connect/tiktok", {
-        method: "POST",
-        body: JSON.stringify({
-          code: String(code),
-          state: String(state),
-          profileId: stateRecord.profileId
-        })
-      });
-
-      await redis.del(oauthKey(String(state)));
-
-      res.redirect("/?connect=success");
-    } catch (error) {
-      console.error(
-        "PostZen OAuth callback:",
-        error.details || error.message
-      );
-
-      res.redirect("/?connect=failed");
-    }
-  }
-);
-
-// --------------------------------------------------
-// TIKTOK ACCOUNTS
-// --------------------------------------------------
-
-app.get(
-  "/api/accounts",
-  ensureReady,
-  requireVerified,
-  async (req, res, next) => {
-    try {
-      const record = await ensureUser(req.identity.uid);
-
-      const data = await postzen(
-        `/v1/accounts?profileId=${encodeURIComponent(
-          record.postzenProfileId
-        )}`
-      );
-
-      const accounts =
-        data.accounts ||
-        data.data ||
-        [];
-
-      await redis.set(
-        `${userKey(req.identity.uid)}:accounts`,
-        accounts
-      );
-
-      res.json({ accounts });
-    } catch (error) {
-      next(error);
-    }
-  }
-);
-
-// --------------------------------------------------
-// VIDEO UPLOAD CONFIGURATION
-// --------------------------------------------------
+app.get("/api/accounts", ensureReady, requireVerified, async (req, res, next) => {
+  try {
+    const record = await ensureUser(req.identity.uid);
+    const data = await postzen(`/v1/accounts?profileId=${encodeURIComponent(record.postzenProfileId)}`);
+    const accounts = data.accounts || data.data || [];
+    await redis.set(`${userKey(req.identity.uid)}:accounts`, accounts);
+    res.json({ accounts });
+  } catch (error) { next(error); }
+});
 
 const upload = multer({
   storage: multer.diskStorage({
     destination: os.tmpdir(),
-
-    filename: (_req, file, cb) => {
-      const safeName = path
-        .basename(file.originalname)
-        .replace(/[^a-zA-Z0-9._-]/g, "_");
-
-      cb(
-        null,
-        `${crypto.randomUUID()}-${safeName}`
-      );
-    }
+    filename: (_req, file, cb) => cb(null, `${crypto.randomUUID()}-${path.basename(file.originalname).replace(/[^a-zA-Z0-9._-]/g, "_")}`)
   }),
+  limits: { fileSize: MAX_BYTES, files: 1 }
+});
 
-  limits: {
-    fileSize: MAX_BYTES,
-    files: 1
+// Native FFmpeg processing runs on the server. No FFmpeg WebAssembly is sent to browsers.
+app.post("/api/process/ffmpeg", ensureReady, requireVerified, upload.single("file"), async (req, res, next) => {
+  const input = req.file;
+  let outputPath = "";
+  try {
+    if (!input) return res.status(400).json({ error: "Choose a video file first." });
+    const ext = path.extname(input.originalname || "").toLowerCase();
+    const allowed = new Set([".mp4", ".mov", ".m4v"]);
+    if (!allowed.has(ext)) return res.status(400).json({ error: "Use an MP4, MOV, or M4V video for native FFmpeg stream-copy processing." });
+
+    const fpsValue = req.body.outputFps ? Number(req.body.outputFps) : 0;
+    if (req.body.outputFps && (!Number.isFinite(fpsValue) || fpsValue < 1 || fpsValue > 240)) {
+      return res.status(400).json({ error: "Output FPS must be between 1 and 240." });
+    }
+
+    outputPath = path.join(os.tmpdir(), `${crypto.randomUUID()}-jv-output.mp4`);
+    const args = ["-hide_banner", "-nostdin", "-y", "-loglevel", "error"];
+    if (fpsValue > 0) {
+      const inputFps = Number(req.body.inputFps);
+      if (!Number.isFinite(inputFps) || inputFps <= 0 || inputFps > 1000) {
+        return res.status(400).json({ error: "A valid detected input FPS is required for timestamp scaling." });
+      }
+      const scale = inputFps / fpsValue;
+      args.push("-itsscale:v", String(scale), "-itsscale:a", String(scale));
+    }
+    args.push("-i", input.path, "-map", "0", "-c", "copy", "-movflags", "+faststart", "-f", "mp4", outputPath);
+
+    await new Promise((resolve, reject) => {
+      const child = spawn(process.env.FFMPEG_PATH || "ffmpeg", args, { stdio: ["ignore", "ignore", "pipe"] });
+      let stderr = "";
+      child.stderr.setEncoding("utf8");
+      child.stderr.on("data", chunk => { stderr = (stderr + chunk).slice(-12000); });
+      child.once("error", error => {
+        if (error.code === "ENOENT") reject(new Error("Native FFmpeg is not installed on this server. Check the Render build command."));
+        else reject(error);
+      });
+      child.once("close", code => code === 0 ? resolve() : reject(new Error(`FFmpeg failed (exit ${code}): ${stderr.trim().slice(-1800) || "unsupported input or stream layout"}`)));
+    });
+
+    const stat = await fs.promises.stat(outputPath);
+    if (!stat.size) throw new Error("FFmpeg produced an empty output file.");
+    const suffix = fpsValue > 0 ? `_itscale_${fpsValue}fps` : "_ffmpeg";
+    const downloadName = `${path.basename(input.originalname, path.extname(input.originalname))}${suffix}.mp4`;
+    res.setHeader("Content-Type", "video/mp4");
+    res.setHeader("Content-Length", String(stat.size));
+    res.setHeader("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(downloadName)}`);
+    res.setHeader("Cache-Control", "no-store");
+    await new Promise((resolve, reject) => {
+      const stream = fs.createReadStream(outputPath);
+      stream.on("error", reject);
+      res.on("finish", resolve);
+      res.on("close", resolve);
+      stream.pipe(res);
+    });
+  } catch (error) {
+    if (!res.headersSent) next(error);
+    else console.error("Native FFmpeg response failed:", error.message);
+  } finally {
+    if (input?.path) fs.promises.unlink(input.path).catch(() => {});
+    if (outputPath) fs.promises.unlink(outputPath).catch(() => {});
   }
 });
 
-// --------------------------------------------------
-// CREATE / UPLOAD / PUBLISH TIKTOK POST
-// --------------------------------------------------
-
-app.post(
-  "/api/posts",
-  ensureReady,
-  requireVerified,
-  upload.single("video"),
-  async (req, res, next) => {
-    const file = req.file;
-
-    try {
-      if (!file) {
-        return res.status(400).json({
-          error: "Choose a video file first."
-        });
-      }
-
-      const record = await ensureUser(req.identity.uid);
-
-      const accountId = String(
-        req.body.accountId || ""
-      );
-
-      // Verify TikTok account ownership.
-
-      const accountResponse = await postzen(
-        `/v1/accounts?profileId=${encodeURIComponent(
-          record.postzenProfileId
-        )}`
-      );
-
-      const accounts =
-        accountResponse.accounts ||
-        accountResponse.data ||
-        [];
-
-      const account = accounts.find(
-        item =>
-          String(item._id || item.id) === accountId &&
-          item.platform === "tiktok"
-      );
-
-      if (!account) {
-        return res.status(403).json({
-          error:
-            "That TikTok account is not connected to this Telegram UID's PostZen profile."
-        });
-      }
-
-      // Validate video type.
-
-      const contentType =
-        file.mimetype || "video/mp4";
-
-      const allowedTypes = new Set([
-        "video/mp4",
-        "video/mpeg",
-        "video/quicktime",
-        "video/avi",
-        "video/x-msvideo",
-        "video/webm",
-        "video/x-m4v"
-      ]);
-
-      if (!allowedTypes.has(contentType)) {
-        return res.status(400).json({
-          error:
-            "Unsupported video type. Use MP4, MOV, WebM, AVI or MPEG."
-        });
-      }
-
-      // Request a presigned upload URL from PostZen.
-
-      const presign = await postzen(
-        "/v1/media/presign",
-        {
-          method: "POST",
-          body: JSON.stringify({
-            filename: file.originalname,
-            contentType,
-            size: file.size,
-            profileId: record.postzenProfileId
-          })
-        }
-      );
-
-      if (!presign.uploadUrl || !presign.publicUrl) {
-        throw new Error(
-          "PostZen returned an incomplete media upload response."
-        );
-      }
-
-      // FIXED: Upload video with explicit Content-Length.
-
-      const stream = fs.createReadStream(file.path);
-
-      const putResponse = await fetch(
-        presign.uploadUrl,
-        {
-          method: "PUT",
-
-          headers: {
-            "Content-Type": contentType,
-            "Content-Length": String(file.size)
-          },
-
-          body: stream,
-          duplex: "half",
-
-          signal: AbortSignal.timeout(
-            15 * 60 * 1000
-          )
-        }
-      );
-
-      if (!putResponse.ok) {
-        const uploadError = await putResponse
-          .text()
-          .catch(() => "");
-
-        throw new Error(
-          `PostZen media upload failed with HTTP ${putResponse.status}: ${uploadError.slice(0, 500)}`
-        );
-      }
-
-      // Prepare TikTok post.
-
-      const mode = String(
-        req.body.mode || "draft"
-      );
-
-      const caption = String(
-        req.body.caption || ""
-      ).slice(0, 2200);
-
-      const postBody = {
-        content: caption,
-
-        mediaItems: [
-          {
-            url: presign.publicUrl
-          }
-        ],
-
-        platforms: [
-          {
-            platform: "tiktok",
-            accountId,
-
-            settings:
-              mode === "draft"
-                ? { uploadAsDraft: true }
-                : {
-                    privacyLevel:
-                      req.body.privacyLevel ||
-                      "publicToEveryone"
-                  }
-          }
-        ]
-      };
-
-      if (mode === "publish") {
-        postBody.publishNow = true;
-      } else if (mode === "schedule") {
-        const date = new Date(
-          req.body.scheduledFor
-        );
-
-        if (
-          !Number.isFinite(date.getTime()) ||
-          date.getTime() < Date.now() + 60000
-        ) {
-          throw new Error(
-            "Choose a schedule time at least 60 seconds in the future."
-          );
-        }
-
-        postBody.scheduledFor = date.toISOString();
-      } else if (mode === "draft") {
-        postBody.isDraft = true;
-      } else {
-        throw new Error("Invalid publishing mode.");
-      }
-
-      // Submit post to PostZen.
-
-      const result = await postzen(
-        "/v1/posts",
-        {
-          method: "POST",
-          body: JSON.stringify(postBody),
-
-          headers: {
-            "x-request-id": crypto.randomUUID()
-          }
-        }
-      );
-
-      const post =
-        result.post ||
-        result.existingPost ||
-        result;
-
-      const history = {
-        id: post._id || crypto.randomUUID(),
-
-        caption,
-
-        status:
-          post.status ||
-          (
-            mode === "draft"
-              ? "draft_submitted"
-              : mode === "schedule"
-                ? "scheduled_submitted"
-                : "publish_submitted"
-          ),
-
-        createdAt: new Date().toISOString(),
-
-        scheduledFor:
-          post.scheduledFor ||
-          postBody.scheduledFor ||
-          null
-      };
-
-      await redis.lpush(
-        postsKey(req.identity.uid),
-        JSON.stringify(history)
-      );
-
-      await redis.ltrim(
-        postsKey(req.identity.uid),
-        0,
-        49
-      );
-
-      res.json({
-        ok: true,
-        post: history,
-        message:
-          result.message ||
-          "Your post request was accepted by PostZen."
-      });
-
-    } catch (error) {
-      next(error);
-
-    } finally {
-      if (file?.path) {
-        fs.promises
-          .unlink(file.path)
-          .catch(() => {});
-      }
-    }
-  }
-);
-
-// --------------------------------------------------
-// POST HISTORY
-// --------------------------------------------------
-
-app.get(
-  "/api/history",
-  ensureReady,
-  requireVerified,
-  async (req, res) => {
-    const items = await redis.lrange(
-      postsKey(req.identity.uid),
-      0,
-      49
-    );
-
-    res.json({
-      posts: items.map(item =>
-        typeof item === "string"
-          ? JSON.parse(item)
-          : item
-      )
+// Kuronai processing is proxied through this server so the Telegram access ID
+// is never shipped to browser JavaScript.
+app.post("/api/process/jarvis", ensureReady, requireVerified, upload.single("file"), async (req, res, next) => {
+  const file = req.file;
+  try {
+    if (!KURONAI_TG_ID) return res.status(503).json({ error: "KURONAI_TG_ID is not configured on the server." });
+    if (!file) return res.status(400).json({ error: "Choose a video file first." });
+    if (file.size > KURONAI_MAX_BYTES) return res.status(413).json({ error: "Kuronai processing is limited to 60 MB per video." });
+    const enhanced = String(req.query.enhanced || "0") === "1";
+    const form = new FormData();
+    const bytes = await fs.promises.readFile(file.path);
+    form.append("file", new Blob([bytes], { type: file.mimetype || "video/mp4" }), file.originalname);
+    form.append("tg_id", KURONAI_TG_ID);
+    form.append("progress", "true");
+    if (!enhanced) form.append("encode_video", "false");
+    const upstream = await fetch(`${KURONAI_API}${enhanced ? "/uploaden/" : "/upload/"}`, {
+      method: "POST", body: form, signal: AbortSignal.timeout(30 * 60 * 1000)
     });
-  }
-);
+    res.status(upstream.status);
+    res.setHeader("Content-Type", upstream.headers.get("content-type") || "application/x-ndjson; charset=utf-8");
+    res.setHeader("Cache-Control", "no-store");
+    if (!upstream.body) return res.end();
+    Readable.fromWeb(upstream.body).pipe(res);
+  } catch (error) { next(error); }
+  finally { if (file?.path) fs.promises.unlink(file.path).catch(() => {}); }
+});
 
-// --------------------------------------------------
-// HEALTH CHECK
-// --------------------------------------------------
+app.get("/api/process/jarvis/download/:fileId", ensureReady, requireVerified, async (req, res, next) => {
+  try {
+    const fileId = String(req.params.fileId || "");
+    if (!/^[a-zA-Z0-9_-]{1,160}$/.test(fileId)) return res.status(400).json({ error: "Invalid Kuronai file ID." });
+    const upstream = await fetch(`${KURONAI_API}/download/${encodeURIComponent(fileId)}`, {
+      signal: AbortSignal.timeout(30 * 60 * 1000)
+    });
+    if (!upstream.ok) return res.status(upstream.status).json({ error: `Kuronai download failed (HTTP ${upstream.status}).` });
+    res.setHeader("Content-Type", upstream.headers.get("content-type") || "video/mp4");
+    if (upstream.headers.get("content-length")) res.setHeader("Content-Length", upstream.headers.get("content-length"));
+    if (upstream.body) Readable.fromWeb(upstream.body).pipe(res); else res.end();
+  } catch (error) { next(error); }
+});
 
-app.get("/api/health", (_req, res) => {
+app.delete("/api/process/jarvis/cleanup/:fileId", ensureReady, requireVerified, async (req, res) => {
+  try {
+    const fileId = String(req.params.fileId || "");
+    if (!/^[a-zA-Z0-9_-]{1,160}$/.test(fileId)) return res.status(400).json({ error: "Invalid Kuronai file ID." });
+    const upstream = await fetch(`${KURONAI_API}/cleanup/${encodeURIComponent(fileId)}`, { method: "DELETE" });
+    res.status(upstream.ok ? 204 : upstream.status).end();
+  } catch { res.status(204).end(); }
+});
+
+app.post("/api/posts", ensureReady, requireVerified, upload.single("video"), async (req, res, next) => {
+  const file = req.file;
+  try {
+    if (!file) return res.status(400).json({ error: "Choose a video file first." });
+    const record = await ensureUser(req.identity.uid);
+    const accountId = String(req.body.accountId || "");
+
+    // Fetch fresh account ownership from PostZen; do not trust a browser-supplied account ID.
+    const accountResponse = await postzen(`/v1/accounts?profileId=${encodeURIComponent(record.postzenProfileId)}`);
+    const accounts = accountResponse.accounts || accountResponse.data || [];
+    const account = accounts.find(item => String(item._id || item.id) === accountId && item.platform === "tiktok");
+    if (!account) return res.status(403).json({ error: "That TikTok account is not connected to this Telegram UID's PostZen profile." });
+
+    const contentType = file.mimetype || "video/mp4";
+    const allowedTypes = new Set(["video/mp4", "video/mpeg", "video/quicktime", "video/avi", "video/x-msvideo", "video/webm", "video/x-m4v"]);
+    if (!allowedTypes.has(contentType)) return res.status(400).json({ error: "Unsupported video type. Use MP4, MOV, WebM, AVI or MPEG." });
+
+    const presign = await postzen("/v1/media/presign", {
+      method: "POST",
+      body: JSON.stringify({
+        filename: file.originalname,
+        contentType,
+        size: file.size,
+        profileId: record.postzenProfileId
+      })
+    });
+    if (!presign.uploadUrl || !presign.publicUrl) throw new Error("PostZen returned an incomplete media upload response.");
+
+    const stream = fs.createReadStream(file.path);
+    const putResponse = await fetch(presign.uploadUrl, {
+      method: "PUT",
+      headers: { "Content-Type": contentType, "Content-Length": String(file.size) },
+      body: stream,
+      duplex: "half",
+      signal: AbortSignal.timeout(15 * 60 * 1000)
+    });
+    if (!putResponse.ok) throw new Error(`PostZen media upload failed with HTTP ${putResponse.status}.`);
+
+    const mode = String(req.body.mode || "draft");
+    const userCaption = String(req.body.caption || "").trim();
+    const watermark = "#jvpersonaltest • Upload Method - @jv_60fps";
+    const caption = (userCaption ? `${userCaption}\n\n${watermark}` : watermark).slice(0, 2200);
+    const postBody = {
+      content: caption,
+      mediaItems: [{ url: presign.publicUrl }],
+      platforms: [{
+        platform: "tiktok",
+        accountId,
+        settings: mode === "draft"
+          ? { uploadAsDraft: true }
+          : { privacyLevel: req.body.privacyLevel || "publicToEveryone" }
+      }]
+    };
+
+    if (mode === "publish") postBody.publishNow = true;
+    else if (mode === "schedule") {
+      const date = new Date(req.body.scheduledFor);
+      if (!Number.isFinite(date.getTime()) || date.getTime() < Date.now() + 60000) {
+        throw new Error("Choose a schedule time at least 60 seconds in the future.");
+      }
+      postBody.scheduledFor = date.toISOString();
+    } else if (mode === "draft") postBody.isDraft = true;
+    else throw new Error("Invalid publishing mode.");
+
+    const result = await postzen("/v1/posts", {
+      method: "POST",
+      body: JSON.stringify(postBody),
+      headers: { "x-request-id": crypto.randomUUID() }
+    });
+    const post = result.post || result.existingPost || result;
+    const history = {
+      id: post._id || crypto.randomUUID(),
+      caption,
+      status: post.status || (mode === "draft" ? "draft_submitted" : mode === "schedule" ? "scheduled_submitted" : "publish_submitted"),
+      createdAt: new Date().toISOString(),
+      scheduledFor: post.scheduledFor || postBody.scheduledFor || null
+    };
+    await redis.lpush(postsKey(req.identity.uid), JSON.stringify(history));
+    await redis.ltrim(postsKey(req.identity.uid), 0, 49);
+    res.json({ ok: true, post: history, message: result.message || "Your post request was accepted by PostZen." });
+  } catch (error) { next(error); }
+  finally { if (file?.path) fs.promises.unlink(file.path).catch(() => {}); }
+});
+
+app.get("/api/history", ensureReady, requireVerified, async (req, res) => {
+  const items = await redis.lrange(postsKey(req.identity.uid), 0, 49);
   res.json({
-    ok: true,
-    service: "JV PostZen"
+    posts: items.map(item => typeof item === "string" ? JSON.parse(item) : item)
   });
 });
 
-// --------------------------------------------------
-// GLOBAL ERROR HANDLER
-// --------------------------------------------------
+app.get("/api/health", (_req, res) => res.json({ ok: true, service: "JV PostZen" }));
 
 app.use((error, _req, res, _next) => {
-  console.error(
-    error.details ||
-    error.stack ||
-    error.message
-  );
-
-  const status =
-    error.code === "LIMIT_FILE_SIZE"
-      ? 413
-      : (error.status || 500);
-
+  console.error(error.details || error.stack || error.message);
+  const status = error.code === "LIMIT_FILE_SIZE" ? 413 : (error.status || 500);
   res.status(status).json({
-    error:
-      error.code === "LIMIT_FILE_SIZE"
-        ? `Video exceeds the ${MAX_MB} MB upload limit.`
-        : (
-            error.message ||
-            "Unexpected server error"
-          ),
-
-    details:
-      process.env.NODE_ENV === "production"
-        ? undefined
-        : error.details
+    error: error.code === "LIMIT_FILE_SIZE"
+      ? `Video exceeds the ${MAX_MB} MB upload limit.`
+      : (error.message || "Unexpected server error"),
+    details: process.env.NODE_ENV === "production" ? undefined : error.details
   });
 });
 
-// --------------------------------------------------
-// START SERVER
-// --------------------------------------------------
-
 app.listen(PORT, () => {
-  console.log(
-    `JV PostZen server listening on ${PORT}`
-  );
-
-  if (missing.length) {
-    console.warn(
-      "Missing environment variables:",
-      missing.join(", ")
-    );
-  }
+  console.log(`JV PostZen server listening on ${PORT}`);
+  if (missing.length) console.warn("Missing environment variables:", missing.join(", "));
 });
