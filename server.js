@@ -7,7 +7,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { Readable } from "node:stream";
+import { Readable, Transform } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { Redis } from "@upstash/redis";
 import jwt from "jsonwebtoken";
@@ -50,7 +50,7 @@ app.use(helmet({
       connectSrc: ["'self'", "https://cdn.jsdelivr.net"],
       workerSrc: ["'self'", "blob:"],
       objectSrc: ["'none'"],
-      frameAncestors: ["'none'"]
+      frameAncestors: ["'self'"]
     }
   }
 }));
@@ -366,21 +366,64 @@ app.delete("/api/process/jarvis/cleanup/:fileId", ensureReady, requireVerified, 
 
 app.post("/api/posts", ensureReady, requireVerified, upload.single("video"), async (req, res, next) => {
   const file = req.file;
+  let progressStreamStarted = false;
+  const sendProgress = (stage, percent, message, extra = {}) => {
+    if (!progressStreamStarted || res.destroyed || res.writableEnded) return;
+    res.write(`${JSON.stringify({ type: "progress", stage, percent: Math.max(0, Math.min(100, Math.round(percent))), message, ...extra })}\n`);
+  };
+  const startProgressStream = () => {
+    if (progressStreamStarted) return;
+    progressStreamStarted = true;
+    res.status(200);
+    res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
+    res.setHeader("Cache-Control", "no-store, no-transform");
+    res.setHeader("X-Accel-Buffering", "no");
+    res.flushHeaders?.();
+  };
   try {
     if (!file) return res.status(400).json({ error: "Choose a video file first." });
+    startProgressStream();
+    sendProgress("profile", 3, "Checking your private PostZen profile…");
     const record = await ensureUser(req.identity.uid);
     const accountId = String(req.body.accountId || "");
 
+    sendProgress("account", 8, "Verifying the selected TikTok account…");
     // Fetch fresh account ownership from PostZen; do not trust a browser-supplied account ID.
     const accountResponse = await postzen(`/v1/accounts?profileId=${encodeURIComponent(record.postzenProfileId)}`);
     const accounts = accountResponse.accounts || accountResponse.data || [];
     const account = accounts.find(item => String(item._id || item.id) === accountId && item.platform === "tiktok");
-    if (!account) return res.status(403).json({ error: "That TikTok account is not connected to this Telegram UID's PostZen profile." });
+    if (!account) throw new Error("That TikTok account is not connected to this Telegram UID's PostZen profile.");
 
     const contentType = file.mimetype || "video/mp4";
     const allowedTypes = new Set(["video/mp4", "video/mpeg", "video/quicktime", "video/avi", "video/x-msvideo", "video/webm", "video/x-m4v"]);
-    if (!allowedTypes.has(contentType)) return res.status(400).json({ error: "Unsupported video type. Use MP4, MOV, WebM, AVI or MPEG." });
+    if (!allowedTypes.has(contentType)) throw new Error("Unsupported video type. Use MP4, MOV, WebM, AVI or MPEG.");
 
+    const mode = String(req.body.mode || "draft");
+    const userCaption = String(req.body.caption || "").trim();
+    const watermark = "#jvpersonaltest • Upload Method - @jv_60fps";
+    const caption = (userCaption ? `${userCaption}\n\n${watermark}` : watermark).slice(0, 2200);
+    const postBody = {
+      content: caption,
+      mediaItems: [],
+      platforms: [{
+        platform: "tiktok",
+        accountId,
+        settings: mode === "draft"
+          ? { uploadAsDraft: true }
+          : { privacyLevel: req.body.privacyLevel || "publicToEveryone" }
+      }]
+    };
+    if (mode === "publish") postBody.publishNow = true;
+    else if (mode === "schedule") {
+      const date = new Date(req.body.scheduledFor);
+      if (!Number.isFinite(date.getTime()) || date.getTime() < Date.now() + 60000) {
+        throw new Error("Choose a schedule time at least 60 seconds in the future.");
+      }
+      postBody.scheduledFor = date.toISOString();
+    } else if (mode === "draft") postBody.isDraft = true;
+    else throw new Error("Invalid publishing mode.");
+
+    sendProgress("presign", 14, "Requesting a secure media upload from PostZen…");
     const presign = await postzen("/v1/media/presign", {
       method: "POST",
       body: JSON.stringify({
@@ -392,7 +435,22 @@ app.post("/api/posts", ensureReady, requireVerified, upload.single("video"), asy
     });
     if (!presign.uploadUrl || !presign.publicUrl) throw new Error("PostZen returned an incomplete media upload response.");
 
-    const stream = fs.createReadStream(file.path);
+    sendProgress("media_upload", 20, "Uploading the processed video to PostZen media storage…");
+    let uploadedBytes = 0;
+    let lastReportedPercent = -1;
+    const meter = new Transform({
+      transform(chunk, encoding, callback) {
+        uploadedBytes += chunk.length;
+        const transferPercent = Math.min(100, Math.round(uploadedBytes / Math.max(file.size, 1) * 100));
+        if (transferPercent >= lastReportedPercent + 1 || uploadedBytes >= file.size) {
+          lastReportedPercent = transferPercent;
+          const pct = 20 + (file.size ? (uploadedBytes / file.size) * 60 : 60);
+          sendProgress("media_upload", pct, `Transferring video to PostZen media storage · ${transferPercent}%`);
+        }
+        callback(null, chunk);
+      }
+    });
+    const stream = fs.createReadStream(file.path).pipe(meter);
     const putResponse = await fetch(presign.uploadUrl, {
       method: "PUT",
       headers: { "Content-Type": contentType, "Content-Length": String(file.size) },
@@ -401,33 +459,9 @@ app.post("/api/posts", ensureReady, requireVerified, upload.single("video"), asy
       signal: AbortSignal.timeout(15 * 60 * 1000)
     });
     if (!putResponse.ok) throw new Error(`PostZen media upload failed with HTTP ${putResponse.status}.`);
+    postBody.mediaItems = [{ url: presign.publicUrl }];
 
-    const mode = String(req.body.mode || "draft");
-    const userCaption = String(req.body.caption || "").trim();
-    const watermark = "#jvpersonaltest • Upload Method - @jv_60fps";
-    const caption = (userCaption ? `${userCaption}\n\n${watermark}` : watermark).slice(0, 2200);
-    const postBody = {
-      content: caption,
-      mediaItems: [{ url: presign.publicUrl }],
-      platforms: [{
-        platform: "tiktok",
-        accountId,
-        settings: mode === "draft"
-          ? { uploadAsDraft: true }
-          : { privacyLevel: req.body.privacyLevel || "publicToEveryone" }
-      }]
-    };
-
-    if (mode === "publish") postBody.publishNow = true;
-    else if (mode === "schedule") {
-      const date = new Date(req.body.scheduledFor);
-      if (!Number.isFinite(date.getTime()) || date.getTime() < Date.now() + 60000) {
-        throw new Error("Choose a schedule time at least 60 seconds in the future.");
-      }
-      postBody.scheduledFor = date.toISOString();
-    } else if (mode === "draft") postBody.isDraft = true;
-    else throw new Error("Invalid publishing mode.");
-
+    sendProgress("publish", 85, "Media upload complete. Submitting the TikTok post request…");
     const result = await postzen("/v1/posts", {
       method: "POST",
       body: JSON.stringify(postBody),
@@ -443,9 +477,17 @@ app.post("/api/posts", ensureReady, requireVerified, upload.single("video"), asy
     };
     await redis.lpush(postsKey(req.identity.uid), JSON.stringify(history));
     await redis.ltrim(postsKey(req.identity.uid), 0, 49);
-    res.json({ ok: true, post: history, message: result.message || "Your post request was accepted by PostZen." });
-  } catch (error) { next(error); }
-  finally { if (file?.path) fs.promises.unlink(file.path).catch(() => {}); }
+    const response = { ok: true, post: history, message: result.message || "Your post request was accepted by PostZen." };
+    sendProgress("complete", 100, "PostZen accepted the TikTok post request.", { result: response });
+    res.end();
+  } catch (error) {
+    if (progressStreamStarted) {
+      if (!res.destroyed && !res.writableEnded) {
+        res.write(`${JSON.stringify({ type: "error", error: error.message || "PostZen publishing failed." })}\n`);
+        res.end();
+      }
+    } else next(error);
+  } finally { if (file?.path) fs.promises.unlink(file.path).catch(() => {}); }
 });
 
 app.get("/api/history", ensureReady, requireVerified, async (req, res) => {
