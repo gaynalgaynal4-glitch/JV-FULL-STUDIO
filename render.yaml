@@ -1,23 +1,12 @@
 services:
   - type: web
-    name: jv-postzen-publisher
+    name: jv-postzen-upstash-existing-bot
     runtime: node
     plan: free
     buildCommand: npm install
     startCommand: npm start
-    healthCheckPath: /api/health
     envVars:
       - key: NODE_VERSION
         value: 20
-      - key: SUPABASE_URL
-        sync: false
-      - key: SUPABASE_PUBLISHABLE_KEY
-        sync: false
-      - key: SUPABASE_SECRET_KEY
-        sync: false
-      - key: POSTZEN_API_KEY
-        sync: false
-      - key: APP_URL
-        sync: false
       - key: MAX_VIDEO_SIZE_MB
         value: 500
