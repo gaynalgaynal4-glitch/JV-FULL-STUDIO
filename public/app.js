@@ -1,151 +1,280 @@
-let supabaseClient = null;
-let session = null;
-let mode = "login";
-let uploadedMediaUrl = "";
-let currentAccounts = [];
+const $ = id => document.getElementById(id);
 
-const $ = (id) => document.getElementById(id);
-async function api(path, options = {}) {
-  if (!session?.access_token) throw new Error("Please sign in first.");
-  const response = await fetch(path, {
-    ...options,
-    headers: { ...(options.headers || {}), Authorization: `Bearer ${session.access_token}` }
-  });
+const STORAGE_UID = "jv_video_lab_telegram_uid_v1";
+const STORAGE_BROWSER_TOKEN = "jv_video_lab_browser_token_v1";
+const STORAGE_SESSION = "jv_postzen_session_v1";
+
+let config = null;
+let identity = null;
+let sessionToken = null;
+let accounts = [];
+
+function browserToken() {
+  let token = localStorage.getItem(STORAGE_BROWSER_TOKEN);
+  if (!token) {
+    if (!crypto?.getRandomValues) throw new Error("Secure browser randomness is unavailable. Open this site over HTTPS in a modern browser.");
+    const bytes = new Uint8Array(24);
+    crypto.getRandomValues(bytes);
+    token = Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
+    localStorage.setItem(STORAGE_BROWSER_TOKEN, token);
+  }
+  return token;
+}
+
+async function api(url, options = {}) {
+  const headers = new Headers(options.headers || {});
+  if (identity?.uid) headers.set("X-JV-Telegram-UID", identity.uid);
+  if (identity?.browserToken) headers.set("X-JV-Browser-Token", identity.browserToken);
+  if (sessionToken) headers.set("Authorization", `Bearer ${sessionToken}`);
+  const response = await fetch(url, { credentials: "same-origin", ...options, headers });
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
+  if (!response.ok) {
+    const reason = data.reason ? ` (${data.reason})` : "";
+    throw new Error((data.error || `Request failed (${response.status})`) + reason);
+  }
+  if (data.sessionToken) {
+    sessionToken = data.sessionToken;
+    localStorage.setItem(STORAGE_SESSION, sessionToken);
+  }
   return data;
 }
-function notice(id, message, error = false) {
-  const el = $(id); el.textContent = message; el.style.color = error ? "#ff9a9a" : "";
+
+function notice(el, message, error = false) {
+  el.textContent = message;
+  el.classList.remove("hidden", "error");
+  if (error) el.classList.add("error");
 }
-async function init() {
-  const cfg = await fetch("/api/config").then(r => r.json());
-  if (!cfg.supabaseUrl || !cfg.supabasePublishableKey || !window.supabase) {
-    notice("authMessage", "Server setup incomplete: add Supabase URL and publishable key in Render.", true);
-    return;
+function toast(message) {
+  const el = $("toast");
+  el.textContent = message;
+  el.classList.remove("hidden");
+  setTimeout(() => el.classList.add("hidden"), 3200);
+}
+function showDashboard() {
+  $("loginView").classList.add("hidden");
+  $("appView").classList.remove("hidden");
+  $("logoutBtn").classList.remove("hidden");
+  $("userId").textContent = `Telegram UID · ${identity.uid}`;
+  loadAccounts();
+  loadHistory();
+}
+function showLogin() {
+  $("appView").classList.add("hidden");
+  $("loginView").classList.remove("hidden");
+  $("logoutBtn").classList.add("hidden");
+}
+
+async function verifyUID(uid, silent = false) {
+  if (!/^[0-9]{5,20}$/.test(uid)) {
+    notice($("loginMessage"), "Enter a valid numeric Telegram UID.", true);
+    return false;
   }
-  supabaseClient = window.supabase.createClient(cfg.supabaseUrl, cfg.supabasePublishableKey);
-  const { data } = await supabaseClient.auth.getSession();
-  session = data.session;
-  supabaseClient.auth.onAuthStateChange((_event, next) => { session = next; renderAuth(); if (session) loadDashboard(); });
-  renderAuth();
-  if (session) await loadDashboard();
-}
-function renderAuth() {
-  $("authPanel").hidden = Boolean(session);
-  $("appPanel").hidden = !session;
-  $("logout").hidden = !session;
-  if (session) {
-    $("userEmail").textContent = session.user.email || "Signed in";
-    $("avatar").textContent = (session.user.email || "U").slice(0,1).toUpperCase();
+  const button = $("verifyBtn");
+  button.disabled = true;
+  button.textContent = "Checking JV membership…";
+  if (!silent) notice($("loginMessage"), "Contacting your existing JV verification server…");
+  identity = { uid, browserToken: browserToken() };
+  sessionToken = null;
+  try {
+    const result = await api("/api/auth/verify", { method: "POST" });
+    localStorage.setItem(STORAGE_UID, uid);
+    if (result.sessionToken) sessionToken = result.sessionToken;
+    $("loginMessage").classList.add("hidden");
+    showDashboard();
+    return true;
+  } catch (error) {
+    if (error.message.includes("session_taken")) {
+      notice($("loginMessage"), "This UID is linked to another browser. Use Reset Extension in your existing JV bot, then verify again here.", true);
+    } else if (error.message.includes("not_member")) {
+      notice($("loginMessage"), "Channel membership was not found. Join the JV channel, then try again.", true);
+    } else if (error.message.includes("blocked")) {
+      notice($("loginMessage"), "This Telegram account is blocked from using the service.", true);
+    } else {
+      notice($("loginMessage"), error.message, true);
+    }
+    return false;
+  } finally {
+    button.disabled = false;
+    button.innerHTML = 'Verify &amp; unlock <span>→</span>';
   }
 }
-document.querySelectorAll(".tab").forEach(btn => btn.addEventListener("click", () => {
-  mode = btn.dataset.mode;
-  document.querySelectorAll(".tab").forEach(x => x.classList.toggle("selected", x === btn));
-  $("authSubmit").textContent = mode === "login" ? "Sign in" : "Create account";
-  $("password").autocomplete = mode === "login" ? "current-password" : "new-password";
-  notice("authMessage", mode === "signup" ? "Use an email and a password with at least 8 characters." : "Sign in with your Supabase Auth account.");
-}));
-$("authSubmit").addEventListener("click", async () => {
+
+async function refreshAuth() {
+  const savedUID = localStorage.getItem(STORAGE_UID);
+  if (!savedUID) return;
+  $("tgUidInput").value = savedUID;
+  identity = { uid: savedUID, browserToken: browserToken() };
+  sessionToken = localStorage.getItem(STORAGE_SESSION);
   try {
-    const email = $("email").value.trim(), password = $("password").value;
-    if (!email || password.length < 8) throw new Error("Enter a valid email and password (at least 8 characters).");
-    $("authSubmit").disabled = true;
-    const result = mode === "signup"
-      ? await supabaseClient.auth.signUp({ email, password })
-      : await supabaseClient.auth.signInWithPassword({ email, password });
-    if (result.error) throw result.error;
-    session = result.data.session;
-    if (!session) notice("authMessage", "Account created. Check your email to confirm it, then sign in.");
-    else { renderAuth(); await loadDashboard(); }
-  } catch (e) { notice("authMessage", e.message, true); }
-  finally { $("authSubmit").disabled = false; }
+    await api("/api/me");
+    showDashboard();
+  } catch {
+    sessionToken = null;
+    localStorage.removeItem(STORAGE_SESSION);
+    showLogin();
+    notice($("loginMessage"), "Your saved JV verification needs to be checked again. Press Verify to continue.", true);
+  }
+}
+
+async function loadAccounts() {
+  try {
+    const data = await api("/api/accounts");
+    accounts = data.accounts || [];
+    const list = $("accountsList");
+    const select = $("accountSelect");
+    list.innerHTML = "";
+    select.innerHTML = "";
+    if (!accounts.length) {
+      list.innerHTML = '<div class="empty-state">No TikTok accounts connected yet. Select “Connect TikTok” to get started.</div>';
+      select.innerHTML = '<option value="">Connect an account first</option>';
+      return;
+    }
+    for (const account of accounts) {
+      const id = account._id || account.id;
+      const name = account.displayName || account.username || "TikTok account";
+      const handle = account.username ? `@${account.username}` : "TikTok";
+      const item = document.createElement("div");
+      item.className = "account-item";
+      item.innerHTML = '<div class="account-left"><span class="tt-icon">♪</span><div><b></b><small></small></div></div><span class="history-status">Connected</span>';
+      item.querySelector("b").textContent = name;
+      item.querySelector("small").textContent = handle;
+      list.appendChild(item);
+      const option = document.createElement("option");
+      option.value = id;
+      option.textContent = `${name} (${handle})`;
+      select.appendChild(option);
+    }
+  } catch (error) {
+    $("accountsList").innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
+  }
+}
+async function loadHistory() {
+  try {
+    const data = await api("/api/history");
+    const list = $("historyList");
+    list.innerHTML = "";
+    if (!data.posts?.length) {
+      list.innerHTML = '<div class="empty-state">Your submitted posts will appear here.</div>';
+      return;
+    }
+    for (const post of data.posts) {
+      const item = document.createElement("div");
+      item.className = "history-item";
+      const left = document.createElement("div");
+      const title = document.createElement("b");
+      title.textContent = post.caption || "TikTok video";
+      const small = document.createElement("small");
+      small.textContent = new Date(post.createdAt).toLocaleString();
+      left.append(title, small);
+      const status = document.createElement("span");
+      status.className = "history-status";
+      status.textContent = String(post.status || "submitted").replaceAll("_", " ");
+      item.append(left, status);
+      list.appendChild(item);
+    }
+  } catch (error) {
+    $("historyList").innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
+  }
+}
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
+}
+
+$("verifyBtn").addEventListener("click", () => verifyUID($("tgUidInput").value.trim()));
+$("tgUidInput").addEventListener("keydown", event => {
+  if (event.key === "Enter") verifyUID($("tgUidInput").value.trim());
 });
-$("logout").addEventListener("click", async () => { await supabaseClient.auth.signOut(); session = null; currentAccounts = []; renderAuth(); });
-async function loadDashboard() {
+$("connectBtn").addEventListener("click", async () => {
+  const button = $("connectBtn");
+  button.disabled = true;
+  button.textContent = "Opening PostZen…";
   try {
-    const data = await api("/api/me");
-    $("workspaceName").textContent = data.workspace.profile_name;
-    currentAccounts = data.accounts || [];
-    $("accountCount").textContent = currentAccounts.length;
-    renderAccounts(); renderHistory(data.posts || []);
-    await handleOAuthReturn();
-  } catch (e) { alert(e.message); }
-}
-function renderAccounts() {
-  $("accountCount").textContent = currentAccounts.length;
-  $("accountList").innerHTML = currentAccounts.length ? currentAccounts.map(a =>
-    `<div class="account"><div class="tiktokicon">♪</div><div class="accountinfo"><b>${escapeHtml(a.displayName || a.username || "TikTok account")}</b><small>@${escapeHtml(a.username || "connected")} · TikTok</small></div><span class="status">${escapeHtml(a.status)}</span></div>`
-  ).join("") : '<div class="empty">No TikTok account connected. Use “Connect” to add one.</div>';
-  $("accountSelect").innerHTML = currentAccounts.length
-    ? currentAccounts.map(a => `<option value="${escapeHtml(a.accountId)}">${escapeHtml(a.displayName || a.username || a.accountId)} (@${escapeHtml(a.username || "TikTok")})</option>`).join("")
-    : '<option value="">Connect an account first</option>';
-}
-function renderHistory(posts) {
-  $("postCount").textContent = posts.length;
-  $("history").innerHTML = posts.length ? posts.map(p =>
-    `<tr><td title="${escapeHtml(p.caption || "")}">${escapeHtml(p.caption || "(No caption)")}</td><td>${escapeHtml(p.publish_mode || "")}</td><td>${escapeHtml(p.status || "submitted")}</td><td>${new Date(p.created_at).toLocaleString()}</td></tr>`
-  ).join("") : '<tr><td colspan="4" class="empty">No posts yet.</td></tr>';
-}
-function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c])); }
-async function connectTikTok() {
-  try { const data = await api("/api/connect/tiktok", { method: "POST" }); location.href = data.authUrl; }
-  catch (e) { alert(e.message); }
-}
-$("connectBtn").addEventListener("click", connectTikTok);
-$("connectTop").addEventListener("click", connectTikTok);
-async function handleOAuthReturn() {
-  const params = new URLSearchParams(location.search);
-  if (params.get("oauth") !== "postzen") return;
-  const code = params.get("code"), state = params.get("state");
-  if (code && state) {
-    try {
-      const result = await api("/api/connect/complete", { method: "POST", headers: { "Content-Type":"application/json" }, body: JSON.stringify({ code, state }) });
-      currentAccounts = result.accounts || currentAccounts; renderAccounts();
-      alert(result.message || "TikTok account connected.");
-    } catch (e) { alert(e.message); }
-  } else if (params.get("error")) alert("TikTok connection was not completed: " + params.get("error"));
-  history.replaceState({}, "", "/");
-}
-$("browse").addEventListener("click", () => $("video").click());
-$("drop").addEventListener("click", e => { if (e.target.id !== "browse") $("video").click(); });
-$("drop").addEventListener("dragover", e => { e.preventDefault(); $("drop").style.borderColor = "#8cf0c0"; });
-$("drop").addEventListener("dragleave", () => $("drop").style.borderColor = "");
-$("drop").addEventListener("drop", e => { e.preventDefault(); $("drop").style.borderColor = ""; if (e.dataTransfer.files[0]) setVideo(e.dataTransfer.files[0]); });
-$("video").addEventListener("change", e => { if (e.target.files[0]) setVideo(e.target.files[0]); });
-function setVideo(file) {
-  $("video").files = createFileList(file);
-  $("fileName").textContent = `${file.name} · ${(file.size / 1024 / 1024).toFixed(1)} MB`;
-  uploadedMediaUrl = "";
-}
-function createFileList(file) { const dt = new DataTransfer(); dt.items.add(file); return dt.files; }
-$("caption").addEventListener("input", () => $("charCount").textContent = $("caption").value.length);
-$("mode").addEventListener("change", () => { $("scheduleWrap").hidden = $("mode").value !== "schedule"; $("publishBtn").textContent = $("mode").value === "draft" ? "Upload & save draft" : $("mode").value === "schedule" ? "Upload & schedule" : "Upload & publish video"; });
-$("postForm").addEventListener("submit", async e => {
-  e.preventDefault();
-  const file = $("video").files[0];
-  if (!file) return notice("publishMessage", "Choose a video file first.", true);
-  if (!currentAccounts.length) return notice("publishMessage", "Connect your TikTok account first.", true);
-  const btn = $("publishBtn"); btn.disabled = true;
-  try {
-    notice("publishMessage", "Uploading video to PostZen storage…");
-    const form = new FormData(); form.append("video", file);
-    const uploaded = await api("/api/upload", { method: "POST", body: form });
-    uploadedMediaUrl = uploaded.publicUrl;
-    notice("publishMessage", "Upload complete. Submitting your post…");
-    const payload = {
-      accountId: $("accountSelect").value, caption: $("caption").value,
-      mediaUrl: uploadedMediaUrl, mode: $("mode").value,
-      scheduledFor: $("scheduledFor").value ? new Date($("scheduledFor").value).toISOString() : null,
-      privacyLevel: $("privacy").value, allowComments: $("comments").checked, isAigc: $("aigc").checked
-    };
-    const result = await api("/api/posts", { method: "POST", headers: { "Content-Type":"application/json" }, body: JSON.stringify(payload) });
-    notice("publishMessage", result.message || "Post submitted.");
-    $("postForm").reset(); $("comments").checked = true; $("charCount").textContent = "0"; $("scheduleWrap").hidden = true; $("fileName").textContent = "MP4, MOV, WEBM, AVI · size limit set by server";
-    await loadDashboard();
-  } catch (err) { notice("publishMessage", err.message, true); }
-  finally { btn.disabled = false; }
+    const result = await api("/api/connect/tiktok", { method: "POST" });
+    location.href = result.authUrl;
+  } catch (error) {
+    toast(error.message);
+  } finally {
+    button.disabled = false;
+    button.textContent = "＋ Connect TikTok";
+  }
 });
-$("refresh").addEventListener("click", loadDashboard);
-init().catch(e => notice("authMessage", e.message, true));
+$("mode").addEventListener("change", () => {
+  const mode = $("mode").value;
+  $("scheduleWrap").classList.toggle("hidden", mode !== "schedule");
+  $("privacyWrap").classList.toggle("hidden", mode === "draft");
+});
+$("caption").addEventListener("input", () => $("captionCount").textContent = $("caption").value.length);
+$("videoFile").addEventListener("change", () => {
+  const file = $("videoFile").files[0];
+  $("fileName").textContent = file ? file.name : "Choose a video";
+});
+$("publishForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  const file = $("videoFile").files[0];
+  if (!file) return notice($("publishMessage"), "Choose a video file.", true);
+  if (!file.type.startsWith("video/")) return notice($("publishMessage"), "Please select a video file.", true);
+  if (file.size > config.maxVideoSizeMB * 1024 * 1024) return notice($("publishMessage"), `The video is larger than ${config.maxVideoSizeMB} MB.`, true);
+  if (!$("accountSelect").value) return notice($("publishMessage"), "Connect and select a TikTok account first.", true);
+  const mode = $("mode").value;
+  const form = new FormData();
+  form.append("video", file);
+  form.append("accountId", $("accountSelect").value);
+  form.append("caption", $("caption").value);
+  form.append("mode", mode);
+  form.append("privacyLevel", $("privacy").value);
+  if (mode === "schedule") {
+    if (!$("scheduleTime").value) return notice($("publishMessage"), "Choose a schedule date and time.", true);
+    form.append("scheduledFor", new Date($("scheduleTime").value).toISOString());
+  }
+  const button = $("publishBtn");
+  button.disabled = true;
+  button.textContent = "Uploading video…";
+  try {
+    const result = await api("/api/posts", { method: "POST", body: form });
+    notice($("publishMessage"), result.message || "Post request submitted to PostZen.");
+    $("publishForm").reset();
+    $("captionCount").textContent = "0";
+    $("fileName").textContent = "Choose a video";
+    $("scheduleWrap").classList.add("hidden");
+    $("privacyWrap").classList.add("hidden");
+    loadHistory();
+  } catch (error) {
+    notice($("publishMessage"), error.message, true);
+  } finally {
+    button.disabled = false;
+    button.innerHTML = 'Upload &amp; submit <span>→</span>';
+  }
+});
+$("refreshHistory").addEventListener("click", loadHistory);
+$("logoutBtn").addEventListener("click", () => {
+  localStorage.removeItem(STORAGE_UID);
+  localStorage.removeItem(STORAGE_SESSION);
+  // Keep browser token: this is the same browser-binding key used by the existing JV bot.
+  identity = null;
+  sessionToken = null;
+  showLogin();
+  toast("Signed out on this website. Use the JV bot's reset option if you need to move browsers.");
+});
+
+(async function init() {
+  try {
+    config = await api("/api/config");
+    $("maxSize").textContent = config.maxVideoSizeMB || 500;
+    $("connectionStatus").textContent = config.ready ? "Server ready" : "Setup required";
+    $("connectionStatus").classList.toggle("online", config.ready);
+    if (!config.ready) {
+      notice($("loginMessage"), `Server setup incomplete: ${(config.missing || []).join(", ") || "Upstash connection"}. Configure Render environment variables.`, true);
+      return;
+    }
+    const params = new URLSearchParams(location.search);
+    if (params.has("connect")) {
+      const code = params.get("connect");
+      toast(code === "success" ? "TikTok connected successfully." : `TikTok connection: ${code}`);
+      history.replaceState({}, "", "/");
+    }
+    await refreshAuth();
+  } catch (error) {
+    $("connectionStatus").textContent = "Server unavailable";
+    notice($("loginMessage"), error.message, true);
+  }
+})();

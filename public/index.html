@@ -1,56 +1,81 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#0b1020">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#090d18">
   <title>JV Studio — PostZen Publisher</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/styles.css">
+  <script src="/app.js" defer></script>
 </head>
 <body>
-  <div class="shell">
-    <aside class="sidebar">
-      <div class="brand"><div class="brandmark">JV</div><div><b>JV STUDIO</b><small>POSTZEN PUBLISHER</small></div></div>
-      <div class="navlabel">WORKSPACE</div>
-      <a class="nav active" href="#dashboard">▦ <span>Dashboard</span></a>
-      <a class="nav" href="#publish">↗ <span>Create post</span></a>
-      <a class="nav" href="#accounts">◎ <span>Connected accounts</span></a>
-      <div class="sidebottom"><div class="avatar" id="avatar">U</div><div class="usertext"><b id="userEmail">Not signed in</b><small>Personal workspace</small></div><button id="logout" class="iconbtn" title="Sign out">↗</button></div>
-    </aside>
-    <main class="main">
-      <header class="top"><div><div class="eyebrow">SOCIAL PUBLISHING / TIKTOK</div><h1>Publisher dashboard</h1></div><div class="topright"><span class="live"><i></i> SERVER</span><button class="btn secondary" id="connectTop">＋ Connect TikTok</button></div></header>
-      <section id="authPanel" class="authcard">
-        <div class="authcopy"><div class="eyebrow">WELCOME TO JV STUDIO</div><h2>Your content, ready to publish.</h2><p>Sign in or create an account to connect your own TikTok profile and manage your posts.</p></div>
-        <div class="authform"><div class="tabs"><button class="tab selected" data-mode="login">Sign in</button><button class="tab" data-mode="signup">Create account</button></div>
-          <label>Email<input id="email" type="email" autocomplete="email" placeholder="you@example.com"></label>
-          <label>Password<input id="password" type="password" autocomplete="current-password" placeholder="At least 8 characters"></label>
-          <button class="btn primary full" id="authSubmit">Sign in</button><p class="hint" id="authMessage">Use your Supabase Auth account.</p>
-        </div>
-      </section>
-      <div id="appPanel" hidden>
-        <section class="stats">
-          <div class="stat"><span>CONNECTED TIKTOK ACCOUNTS</span><strong id="accountCount">0</strong><small>In your personal PostZen profile</small></div>
-          <div class="stat"><span>POSTS SUBMITTED</span><strong id="postCount">0</strong><small>Saved in your publishing history</small></div>
-          <div class="stat"><span>WORKSPACE</span><strong class="smallvalue" id="workspaceName">My workspace</strong><small>Separate from other users</small></div>
-        </section>
-        <section class="grid">
-          <article class="panel" id="accounts"><div class="panelhead"><div><div class="eyebrow">YOUR CHANNELS</div><h2>Connected accounts</h2></div><button class="btn secondary" id="connectBtn">＋ Connect</button></div><div id="accountList" class="accountlist"><div class="empty">No accounts connected yet.</div></div></article>
-          <article class="panel" id="publish"><div class="panelhead"><div><div class="eyebrow">CONTENT STUDIO</div><h2>Create a TikTok post</h2></div><span class="tag">VIDEO</span></div>
-            <form id="postForm">
-              <label>Publish to<select id="accountSelect" required><option value="">Connect an account first</option></select></label>
-              <label>Video file<div class="drop" id="drop"><input id="video" type="file" accept="video/mp4,video/quicktime,video/webm,video/x-msvideo,video/mpeg,video/x-m4v" hidden><div class="uploadicon">↑</div><b>Drop your video here</b><span>or <button type="button" class="textbtn" id="browse">browse files</button></span><small id="fileName">MP4, MOV, WEBM, AVI · size limit set by server</small></div></label>
-              <label>Caption<textarea id="caption" maxlength="2200" rows="4" placeholder="Write your TikTok caption..."></textarea><small class="counter"><span id="charCount">0</span> / 2,200</small></label>
-              <div class="twocol"><label>Privacy<select id="privacy"><option value="publicToEveryone">Public</option><option value="mutualFollowFriends">Friends</option><option value="selfOnly">Only me</option></select></label><label>Publish<select id="mode"><option value="now">Publish now</option><option value="schedule">Schedule</option><option value="draft">Save as draft</option></select></label></div>
-              <label id="scheduleWrap" hidden>Schedule date and time<input type="datetime-local" id="scheduledFor"></label>
-              <div class="checks"><label class="check"><input type="checkbox" id="comments" checked> Allow comments</label><label class="check"><input type="checkbox" id="aigc"> AI-generated content</label></div>
-              <button class="btn primary full" id="publishBtn" type="submit">Upload & publish video</button><p class="hint" id="publishMessage">Your video is uploaded directly to PostZen storage.</p>
-            </form>
-          </article>
-        </section>
-        <section class="panel history"><div class="panelhead"><div><div class="eyebrow">RECENT ACTIVITY</div><h2>Publishing history</h2></div><button class="btn secondary" id="refresh">Refresh</button></div><div class="tablewrap"><table><thead><tr><th>CAPTION</th><th>MODE</th><th>STATUS</th><th>DATE</th></tr></thead><tbody id="history"><tr><td colspan="4" class="empty">No posts yet.</td></tr></tbody></table></div></section>
+  <div class="ambient ambient-one"></div><div class="ambient ambient-two"></div>
+  <header class="topbar">
+    <a class="brand" href="/"><span class="brand-mark">JV</span><span>JV <b>STUDIO</b><small>POSTZEN PUBLISHER</small></span></a>
+    <div class="top-actions"><span id="connectionStatus" class="status-pill"><i></i> Checking server</span><button id="logoutBtn" class="ghost hidden">Sign out</button></div>
+  </header>
+
+  <main class="shell">
+    <section id="loginView" class="login-layout">
+      <div class="hero-copy">
+        <div class="eyebrow"><span class="spark"></span> CREATOR WORKSPACE</div>
+        <h1>Publish smarter.<br><span>Stay in control.</span></h1>
+        <p>Connect TikTok through PostZen, upload videos, and manage your publishing workflow in one workspace. Your existing JV Telegram bot remains the access authority.</p>
+        <div class="feature-row"><span>✦ Existing JV bot verification</span><span>✦ Private UID workspace</span><span>✦ PostZen publishing</span></div>
       </div>
-      <footer>JV STUDIO · MULTI-USER PUBLISHING · POWERED BY POSTZEN</footer>
-    </main>
-  </div>
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <script src="/app.js"></script>
-</body></html>
+      <div class="login-card">
+        <div class="card-icon">↗</div>
+        <p class="overline">JV VIDEO LAB ACCESS</p>
+        <h2>Verify your Telegram UID.</h2>
+        <p class="muted">Enter the Telegram UID provided by your existing JV bot. The same verification server used by your HTML project will check membership and browser-session ownership.</p>
+        <label class="field-label" for="tgUidInput">Telegram user ID</label>
+        <input id="tgUidInput" type="text" inputmode="numeric" autocomplete="off" maxlength="20" placeholder="Paste your Telegram UID">
+        <button id="verifyBtn" class="button primary full" type="button">Verify &amp; unlock <span>→</span></button>
+        <a class="channel-link" href="https://t.me/jv_60fps" target="_blank" rel="noopener noreferrer">Join the JV Telegram channel</a>
+        <div id="loginMessage" class="notice hidden"></div>
+        <div class="security-note">Your JV server checks membership and browser-session ownership. This project does not use Gmail, Firebase Auth, Supabase Auth, or Telegram Login Widget.</div>
+      </div>
+    </section>
+
+    <section id="appView" class="hidden">
+      <div class="welcome-row">
+        <div><div class="eyebrow">YOUR WORKSPACE</div><h1>Creator <span>dashboard</span></h1><p class="muted">Your workspace is associated with your verified Telegram UID.</p></div>
+        <div class="user-chip"><span class="avatar-placeholder">JV</span><div><b>Verified Telegram user</b><small id="userId"></small></div></div>
+      </div>
+      <div class="dashboard-grid">
+        <section class="panel accounts-panel">
+          <div class="panel-heading"><div><p class="overline">SOCIAL ACCOUNTS</p><h2>Connected TikTok accounts</h2></div><button id="connectBtn" class="button secondary">＋ Connect TikTok</button></div>
+          <div id="accountsList" class="accounts-list"><div class="empty-state">Loading your accounts…</div></div>
+        </section>
+        <section class="panel publish-panel">
+          <div class="panel-heading"><div><p class="overline">NEW CONTENT</p><h2>Publish a video</h2></div><span class="tag">TIKTOK</span></div>
+          <form id="publishForm">
+            <label class="field-label" for="accountSelect">TikTok account</label>
+            <select id="accountSelect" required><option value="">Connect an account first</option></select>
+            <label class="field-label" for="caption">Caption <small>Up to 2,200 characters</small></label>
+            <textarea id="caption" maxlength="2200" rows="4" placeholder="Write your caption…"></textarea>
+            <div class="counter"><span id="captionCount">0</span>/2200</div>
+            <label class="field-label">Video file</label>
+            <label class="dropzone" for="videoFile"><span class="upload-icon">↑</span><b id="fileName">Choose a video</b><small>MP4, MOV, WebM · up to <span id="maxSize">500</span> MB</small><input id="videoFile" type="file" accept="video/mp4,video/quicktime,video/webm,video/mpeg,video/avi,video/x-m4v" required></label>
+            <label class="field-label" for="mode">Publishing mode</label>
+            <select id="mode"><option value="draft">Save as TikTok draft</option><option value="publish">Publish now</option><option value="schedule">Schedule for later</option></select>
+            <div id="scheduleWrap" class="hidden"><label class="field-label" for="scheduleTime">Schedule date and time</label><input id="scheduleTime" type="datetime-local"></div>
+            <div id="privacyWrap" class="hidden"><label class="field-label" for="privacy">Who can watch?</label><select id="privacy"><option value="publicToEveryone">Everyone</option><option value="mutualFollowFriends">Friends</option><option value="selfOnly">Only you</option></select></div>
+            <button id="publishBtn" class="button primary full" type="submit">Upload &amp; submit <span>→</span></button>
+            <div id="publishMessage" class="notice hidden"></div>
+          </form>
+        </section>
+        <section class="panel history-panel">
+          <div class="panel-heading"><div><p class="overline">RECENT ACTIVITY</p><h2>Publishing history</h2></div><button id="refreshHistory" class="ghost">↻ Refresh</button></div>
+          <div id="historyList" class="history-list"><div class="empty-state">Loading history…</div></div>
+        </section>
+      </div>
+      <p class="footer-note">Existing JV bot verification · Upstash Redis · PostZen API</p>
+    </section>
+  </main>
+  <div id="toast" class="toast hidden"></div>
+</body>
+</html>
