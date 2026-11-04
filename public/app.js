@@ -8,6 +8,12 @@ let config = null;
 let identity = null;
 let sessionToken = null;
 let accounts = [];
+let selectedMethod = localStorage.getItem("jv_postzen_processing_method_v1") || "local";
+if (!Object.prototype.hasOwnProperty.call({ enhanced:1, local:1, ffmpeg:1 }, selectedMethod)) selectedMethod = "local";
+let videoLabReady = false;
+let videoLabReadyPromise = null;
+let activeVideoLabJob = null;
+const METHOD_LABELS = { enhanced: "ENHANCED METHOD", local: "LOCAL METHOD", ffmpeg: "FFMPEG METHOD" };
 
 function browserToken() {
   let token = localStorage.getItem(STORAGE_BROWSER_TOKEN);
@@ -54,6 +60,8 @@ function showDashboard() {
   $("loginView").classList.add("hidden");
   $("appView").classList.remove("hidden");
   $("logoutBtn").classList.remove("hidden");
+  $("methodSettingsBtn").classList.remove("hidden");
+  updateMethodUI();
   $("userId").textContent = `Telegram UID · ${identity.uid}`;
   loadAccounts();
   loadHistory();
@@ -180,6 +188,108 @@ function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
 }
 
+function updateMethodUI() {
+  const label = METHOD_LABELS[selectedMethod] || METHOD_LABELS.local;
+  $("selectedMethodTag").textContent = label;
+  document.querySelectorAll(".method-choice").forEach(button => button.classList.toggle("selected", button.dataset.method === selectedMethod));
+}
+function showWorkflow(message, percent = 0, stage = "", indeterminate = false) {
+  $("workflowProgress").classList.remove("hidden");
+  $("workflowStatus").textContent = message;
+  $("workflowPercent").textContent = indeterminate ? "Working" : `${Math.max(0, Math.min(100, Math.round(percent)))}%`;
+  const fill = $("workflowProgressBar");
+  fill.classList.toggle("indeterminate", indeterminate);
+  fill.style.width = indeterminate ? "100%" : `${Math.max(0, Math.min(100, percent))}%`;
+  $("workflowStage").textContent = stage;
+}
+function hideWorkflow() { $("workflowProgress").classList.add("hidden"); }
+function waitForVideoLab() {
+  if (videoLabReady) return Promise.resolve();
+  if (!videoLabReadyPromise) videoLabReadyPromise = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("Video Lab processor did not load. Refresh the page and try again.")), 20000);
+    window.__jvVideoLabReady = () => { clearTimeout(timer); videoLabReady = true; resolve(); };
+  });
+  return videoLabReadyPromise;
+}
+function processInVideoLab(file, method) {
+  return new Promise(async (resolve, reject) => {
+    try {
+      await waitForVideoLab();
+      const requestId = crypto.randomUUID();
+      const timeout = setTimeout(() => { if (activeVideoLabJob?.requestId === requestId) { activeVideoLabJob = null; reject(new Error("Video processing timed out. Check the selected method server and try again.")); } }, 30 * 60 * 1000);
+      activeVideoLabJob = { requestId, resolve: value => { clearTimeout(timeout); activeVideoLabJob = null; resolve(value); }, reject: error => { clearTimeout(timeout); activeVideoLabJob = null; reject(error); } };
+      $("videoLabFrame").contentWindow.postMessage({ type: "JV_VIDEO_LAB_PROCESS", requestId, method, file }, location.origin);
+    } catch (error) { reject(error); }
+  });
+}
+function uploadPostWithProgress(form, onProgress, onServerProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    let consumed = 0, pending = "", finalResult = null, serverError = null;
+    const parseProgress = (flush = false) => {
+      const fresh = xhr.responseText.slice(consumed);
+      consumed = xhr.responseText.length;
+      pending += fresh;
+      const lines = pending.split(/\r?\n/);
+      pending = lines.pop();
+      if (flush && pending.trim()) { lines.push(pending); pending = ""; }
+      for (const raw of lines) {
+        const line = raw.trim(); if (!line) continue;
+        let item; try { item = JSON.parse(line); } catch { continue; }
+        if (item.type === "progress") onServerProgress?.(item);
+        else if (item.type === "complete") finalResult = item.result || { ok: true, message: item.message };
+        else if (item.type === "error") serverError = item.error || "PostZen publishing failed.";
+      }
+    };
+    xhr.open("POST", "/api/posts", true);
+    if (identity?.uid) xhr.setRequestHeader("X-JV-Telegram-UID", identity.uid);
+    if (identity?.browserToken) xhr.setRequestHeader("X-JV-Browser-Token", identity.browserToken);
+    if (sessionToken) xhr.setRequestHeader("Authorization", `Bearer ${sessionToken}`);
+    xhr.upload.onprogress = event => { if (event.lengthComputable) onProgress(Math.round(event.loaded / event.total * 100)); };
+    xhr.upload.onload = () => onServerProgress?.({ type:"progress", stage:"server_receive", percent:0, message:"Processed video received by JV PostZen. Preparing media storage…" });
+    xhr.onprogress = () => parseProgress();
+    xhr.onload = () => {
+      parseProgress(true);
+      if (xhr.status >= 200 && xhr.status < 300 && !serverError && finalResult) resolve(finalResult);
+      else if (serverError) reject(new Error(serverError));
+      else {
+        let data = {}; try { data = JSON.parse(xhr.responseText || "{}"); } catch {}
+        reject(new Error(data.error || `PostZen upload failed (HTTP ${xhr.status}).`));
+      }
+    };
+    xhr.onerror = () => reject(new Error("Network error while uploading the processed video to PostZen."));
+    xhr.onabort = () => reject(new Error("PostZen upload was cancelled."));
+    xhr.send(form);
+  });
+}
+
+window.addEventListener("message", event => {
+  if (event.origin !== location.origin || event.source !== $("videoLabFrame").contentWindow) return;
+  const data = event.data || {};
+  if (data.type === "JV_VIDEO_LAB_READY") { videoLabReady = true; window.__jvVideoLabReady?.(); return; }
+  if (!activeVideoLabJob || data.requestId !== activeVideoLabJob.requestId) return;
+  if (data.type === "JV_VIDEO_LAB_PROGRESS") {
+    showWorkflow(data.message || "Processing video…", data.progress ?? 0, data.stage || "Selected method is running in JV Video Lab.", data.indeterminate === true);
+  } else if (data.type === "JV_VIDEO_LAB_RESULT") {
+    activeVideoLabJob.resolve({ blob: data.blob, fileName: data.fileName || "processed-video.mp4" });
+  } else if (data.type === "JV_VIDEO_LAB_ERROR") {
+    activeVideoLabJob.reject(new Error(data.error || "The selected video processing method failed."));
+  }
+});
+const videoLabFrame = $("videoLabFrame");
+videoLabFrame.addEventListener("load", () => videoLabFrame.contentWindow?.postMessage({ type: "JV_VIDEO_LAB_PING" }, location.origin));
+videoLabFrame.contentWindow?.postMessage({ type: "JV_VIDEO_LAB_PING" }, location.origin);
+$("methodSettingsBtn").addEventListener("click", () => { updateMethodUI(); $("methodModal").classList.remove("hidden"); });
+$("closeMethodModal").addEventListener("click", () => $("methodModal").classList.add("hidden"));
+$("methodModal").addEventListener("click", event => { if (event.target === $("methodModal")) $("methodModal").classList.add("hidden"); });
+document.querySelectorAll(".method-choice").forEach(button => button.addEventListener("click", () => {
+  selectedMethod = button.dataset.method;
+  localStorage.setItem("jv_postzen_processing_method_v1", selectedMethod);
+  updateMethodUI();
+  $("methodModal").classList.add("hidden");
+  toast(`${METHOD_LABELS[selectedMethod]} selected`);
+}));
+
 $("verifyBtn").addEventListener("click", () => verifyUID($("tgUidInput").value.trim()));
 $("tgUidInput").addEventListener("keydown", event => {
   if (event.key === "Enter") verifyUID($("tgUidInput").value.trim());
@@ -213,25 +323,35 @@ $("publishForm").addEventListener("submit", async event => {
   const file = $("videoFile").files[0];
   if (!file) return notice($("publishMessage"), "Choose a video file.", true);
   if (!file.type.startsWith("video/")) return notice($("publishMessage"), "Please select a video file.", true);
+  const extension = file.name.split(".").pop().toLowerCase();
+  const supportedForMethod = selectedMethod === "ffmpeg" ? ["mp4", "mov", "m4v"] : ["mp4"];
+  if (!supportedForMethod.includes(extension)) return notice($("publishMessage"), `${METHOD_LABELS[selectedMethod]} supports ${supportedForMethod.join(", ").toUpperCase()} files only.`, true);
   if (file.size > config.maxVideoSizeMB * 1024 * 1024) return notice($("publishMessage"), `The video is larger than ${config.maxVideoSizeMB} MB.`, true);
   if (!$("accountSelect").value) return notice($("publishMessage"), "Connect and select a TikTok account first.", true);
   const mode = $("mode").value;
-  const form = new FormData();
-  form.append("video", file);
-  form.append("accountId", $("accountSelect").value);
-  form.append("caption", $("caption").value);
-  form.append("mode", mode);
-  form.append("privacyLevel", $("privacy").value);
-  if (mode === "schedule") {
-    if (!$("scheduleTime").value) return notice($("publishMessage"), "Choose a schedule date and time.", true);
-    form.append("scheduledFor", new Date($("scheduleTime").value).toISOString());
-  }
+  if (mode === "schedule" && !$("scheduleTime").value) return notice($("publishMessage"), "Choose a schedule date and time.", true);
   const button = $("publishBtn");
   button.disabled = true;
-  button.textContent = "Uploading video…";
+  button.textContent = "Processing video…";
+  $("publishMessage").classList.add("hidden");
   try {
-    const result = await api("/api/posts", { method: "POST", body: form });
-    notice($("publishMessage"), result.message || "Post request submitted to PostZen.");
+    showWorkflow(`Starting ${METHOD_LABELS[selectedMethod]}…`, 2, "Preparing the original video.");
+    const processed = await processInVideoLab(file, selectedMethod);
+    if (!processed?.blob?.size) throw new Error("The selected method returned an empty processed video.");
+    showWorkflow("Video processing complete", 100, "Preparing the processed file for PostZen.");
+
+    const form = new FormData();
+    form.append("video", processed.blob, processed.fileName || file.name.replace(/\.[^.]+$/, "") + "_processed.mp4");
+    form.append("accountId", $("accountSelect").value);
+    form.append("caption", $("caption").value);
+    form.append("mode", mode);
+    form.append("privacyLevel", $("privacy").value);
+    if (mode === "schedule") form.append("scheduledFor", new Date($("scheduleTime").value).toISOString());
+
+    showWorkflow("Uploading processed video to PostZen…", 0, "The selected processing method has finished. PostZen media upload is now running.");
+    const result = await uploadPostWithProgress(form, pct => showWorkflow(`Uploading to JV PostZen server · ${pct}%`, Math.min(10, pct * 0.10), "Sending the processed MP4 from your browser to JV PostZen."), event => showWorkflow(event.message || "PostZen is processing the upload…", event.stage === "server_receive" ? 10 : 10 + (event.percent ?? 0) * 0.90, event.stage || "PostZen media upload and publishing."));
+    showWorkflow("Post submitted successfully", 100, result.message || "PostZen accepted the TikTok post request.");
+    notice($("publishMessage"), result.message || "Processed video submitted to PostZen.");
     $("publishForm").reset();
     $("captionCount").textContent = "0";
     $("fileName").textContent = "Choose a video";
@@ -239,10 +359,11 @@ $("publishForm").addEventListener("submit", async event => {
     $("privacyWrap").classList.add("hidden");
     loadHistory();
   } catch (error) {
+    showWorkflow("Workflow failed", 0, error.message);
     notice($("publishMessage"), error.message, true);
   } finally {
     button.disabled = false;
-    button.innerHTML = 'Upload &amp; submit <span>→</span>';
+    button.innerHTML = 'Patch video &amp; post to TikTok <span>→</span>';
   }
 });
 $("refreshHistory").addEventListener("click", loadHistory);
