@@ -6,11 +6,9 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "check": "node --check server.js && node --check public/app.js && node scripts/check-inline.js"
+    "check": "node --check server.js && node --check public/app.js"
   },
-  "engines": {
-    "node": ">=20"
-  },
+  "engines": { "node": ">=20" },
   "dependencies": {
     "@upstash/redis": "^1.35.3",
     "dotenv": "^16.4.7",
