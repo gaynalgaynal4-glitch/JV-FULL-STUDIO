@@ -15,7 +15,7 @@
   <div class="ambient ambient-one"></div><div class="ambient ambient-two"></div>
   <header class="topbar">
     <a class="brand" href="/"><span class="brand-mark">JV</span><span>JV <b>STUDIO</b><small>POSTZEN PUBLISHER</small></span></a>
-    <div class="top-actions"><button id="methodSettingsBtn" class="ghost hidden" type="button">⚙ Processing method</button><span id="connectionStatus" class="status-pill"><i></i> Checking server</span><button id="logoutBtn" class="ghost hidden">Sign out</button></div>
+    <div class="top-actions"><span id="connectionStatus" class="status-pill"><i></i> Checking server</span><button id="logoutBtn" class="ghost hidden">Sign out</button></div>
   </header>
 
   <main class="shell">
@@ -51,7 +51,7 @@
           <div id="accountsList" class="accounts-list"><div class="empty-state">Loading your accounts…</div></div>
         </section>
         <section class="panel publish-panel">
-          <div class="panel-heading"><div><p class="overline">NEW CONTENT</p><h2>Publish a video</h2></div><span class="tag" id="selectedMethodTag">LOCAL METHOD</span></div>
+          <div class="panel-heading"><div><p class="overline">NEW CONTENT</p><h2>Publish a video</h2></div><span class="tag">TIKTOK</span></div>
           <form id="publishForm">
             <label class="field-label" for="accountSelect">TikTok account</label>
             <select id="accountSelect" required><option value="">Connect an account first</option></select>
@@ -59,13 +59,12 @@
             <textarea id="caption" maxlength="2200" rows="4" placeholder="Write your caption…"></textarea>
             <div class="counter"><span id="captionCount">0</span>/2200</div>
             <label class="field-label">Video file</label>
-            <label class="dropzone" for="videoFile"><span class="upload-icon">↑</span><b id="fileName">Choose a video</b><small>MP4 for Enhanced/Local · MP4, MOV or M4V for FFmpeg · up to <span id="maxSize">500</span> MB</small><input id="videoFile" type="file" accept="video/mp4,video/quicktime,video/x-m4v" required></label>
+            <label class="dropzone" for="videoFile"><span class="upload-icon">↑</span><b id="fileName">Choose a video</b><small>MP4, MOV, WebM · up to <span id="maxSize">500</span> MB</small><input id="videoFile" type="file" accept="video/mp4,video/quicktime,video/webm,video/mpeg,video/avi,video/x-m4v" required></label>
             <label class="field-label" for="mode">Publishing mode</label>
             <select id="mode"><option value="draft">Save as TikTok draft</option><option value="publish">Publish now</option><option value="schedule">Schedule for later</option></select>
             <div id="scheduleWrap" class="hidden"><label class="field-label" for="scheduleTime">Schedule date and time</label><input id="scheduleTime" type="datetime-local"></div>
             <div id="privacyWrap" class="hidden"><label class="field-label" for="privacy">Who can watch?</label><select id="privacy"><option value="publicToEveryone">Everyone</option><option value="mutualFollowFriends">Friends</option><option value="selfOnly">Only you</option></select></div>
-            <button id="publishBtn" class="button primary full" type="submit">Upload &amp; post to TikTok <span>→</span></button>
-            <div id="workflowProgress" class="workflow-progress hidden" aria-live="polite"><div class="workflow-progress-top"><b id="workflowStatus">Waiting…</b><span id="workflowPercent">0%</span></div><div class="workflow-track"><div id="workflowProgressBar" class="workflow-fill"></div></div><small id="workflowStage">Only Upload sends the original video unchanged to PostZen. Other methods process it first.</small></div>
+            <button id="publishBtn" class="button primary full" type="submit">Upload &amp; submit <span>→</span></button>
             <div id="publishMessage" class="notice hidden"></div>
           </form>
         </section>
@@ -77,21 +76,6 @@
       <p class="footer-note">Existing JV bot verification · Upstash Redis · PostZen API</p>
     </section>
   </main>
-
-  <div id="methodModal" class="method-modal hidden" role="dialog" aria-modal="true" aria-labelledby="methodModalTitle">
-    <section class="method-dialog">
-      <div class="method-dialog-head"><div><p class="overline">VIDEO PROCESSING</p><h2 id="methodModalTitle">Choose a method</h2></div><button id="closeMethodModal" class="ghost" type="button" aria-label="Close">✕</button></div>
-      <p class="muted">Choose a method. Only Upload sends your original video directly to PostZen without video processing.</p>
-      <div class="method-choice-list">
-        <button class="method-choice" type="button" data-method="enhanced"><span><b>Enhanced method</b><small>Secure server processing through Kuronai</small></span><i>SERVER · ENHANCED</i></button>
-        <button class="method-choice" type="button" data-method="local"><span><b>Local method</b><small>Patch the MP4 in your browser; video stays on this device until publishing</small></span><i>LOCAL · PATCH</i></button>
-        <button class="method-choice" type="button" data-method="ffmpeg"><span><b>FFmpeg method</b><small>Native server-side FFmpeg stream-copy remux; no WebAssembly</small></span><i>SERVER · FFmpeg</i></button>
-        <button class="method-choice" type="button" data-method="upload"><span><b>Only Upload</b><small>No video patching, conversion, or enhancement. Send the original video directly to PostZen.</small></span><i>DIRECT · POSTZEN</i></button>
-      </div>
-      <div id="methodSaveMessage" class="notice hidden"></div>
-    </section>
-  </div>
-  <iframe id="videoLabFrame" title="JV Video Lab processing engine" src="/video-lab.html?embed=1" class="video-lab-frame" aria-hidden="true"></iframe>
   <div id="toast" class="toast hidden"></div>
 </body>
 </html>
