@@ -251,6 +251,70 @@ const upload = multer({
   limits: { fileSize: MAX_BYTES, files: 1 }
 });
 
+// Server-side FFprobe metadata inspection and FFmpeg cover-frame extraction.
+app.post("/api/video/inspect", ensureReady, requireVerified, upload.single("file"), async (req, res, next) => {
+  const input = req.file;
+  const generated = [];
+  try {
+    if (!input) return res.status(400).json({ error: "Choose a video file first." });
+    const ext = path.extname(input.originalname || "").toLowerCase();
+    if (![".mp4", ".mov", ".m4v", ".webm", ".avi", ".mpeg", ".mpg"].includes(ext)) {
+      return res.status(400).json({ error: "Unsupported video format for server inspection." });
+    }
+    const run = (command, args) => new Promise((resolve, reject) => {
+      const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+      let stdout = "", stderr = "";
+      child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8");
+      child.stdout.on("data", chunk => { stdout = (stdout + chunk).slice(-2_000_000); });
+      child.stderr.on("data", chunk => { stderr = (stderr + chunk).slice(-12_000); });
+      child.once("error", error => reject(error.code === "ENOENT" ? new Error(`${command} is not installed on this server. Ensure FFmpeg/FFprobe is included in the Render build.`) : error));
+      child.once("close", code => code === 0 ? resolve(stdout) : reject(new Error(`${command} failed: ${stderr.trim().slice(-1600) || "unsupported video"}`)));
+    });
+    const raw = await run(process.env.FFPROBE_PATH || "ffprobe", ["-v", "error", "-show_streams", "-show_format", "-of", "json", input.path]);
+    const probe = JSON.parse(raw);
+    const streams = probe.streams || [];
+    const video = streams.find(stream => stream.codec_type === "video");
+    const audio = streams.find(stream => stream.codec_type === "audio");
+    if (!video) throw new Error("No video stream was found in this file.");
+    const ratio = value => {
+      if (!value || value === "0/0") return 0;
+      const [a, b] = String(value).split("/").map(Number);
+      return b ? a / b : a;
+    };
+    const duration = Number(video.duration || probe.format?.duration || 0);
+    const fps = ratio(video.avg_frame_rate) || ratio(video.r_frame_rate);
+    const streamBitrate = Number(video.bit_rate || 0);
+    const totalBitrate = Number(probe.format?.bit_rate || 0) || (duration > 0 ? input.size * 8 / duration : 0);
+    const times = duration > 0 ? [0, .25, .5, .75, .95].map(f => Math.max(0, Math.min(duration - .05, duration * f))) : [0];
+    const thumbnails = [];
+    for (const time of times) {
+      const framePath = path.join(os.tmpdir(), `${crypto.randomUUID()}-jv-cover.jpg`);
+      generated.push(framePath);
+      await run(process.env.FFMPEG_PATH || "ffmpeg", ["-hide_banner", "-loglevel", "error", "-ss", String(time), "-i", input.path, "-frames:v", "1", "-vf", "scale=480:270:force_original_aspect_ratio=decrease,pad=480:270:(ow-iw)/2:(oh-ih)/2", "-q:v", "4", "-y", framePath]);
+      const bytes = await fs.promises.readFile(framePath);
+      thumbnails.push({ time, dataUrl: `data:image/jpeg;base64,${bytes.toString("base64")}` });
+    }
+    res.setHeader("Cache-Control", "no-store");
+    res.json({
+      fileName: input.originalname,
+      fileSize: input.size,
+      width: Number(video.width || 0),
+      height: Number(video.height || 0),
+      fps,
+      duration,
+      videoBitrate: streamBitrate,
+      audioBitrate: Number(audio?.bit_rate || 0),
+      totalBitrate,
+      thumbnails
+    });
+  } catch (error) {
+    next(error);
+  } finally {
+    if (input?.path) fs.promises.unlink(input.path).catch(() => {});
+    for (const file of generated) fs.promises.unlink(file).catch(() => {});
+  }
+});
+
 // Native FFmpeg processing runs on the server. No FFmpeg WebAssembly is sent to browsers.
 app.post("/api/process/ffmpeg", ensureReady, requireVerified, upload.single("file"), async (req, res, next) => {
   const input = req.file;
