@@ -6,7 +6,7 @@ This project keeps the two supplied websites as separate HTML documents. The Pos
 
 - `public/index.html` — JV PostZen website: existing JV bot verification, TikTok account connection, caption, video selection, publishing mode, method settings and live workflow progress.
 - `public/video-lab.html` — supplied JV Video Lab HTML and its processing methods. PostZen loads this page in a hidden same-origin iframe for processing. The two HTML documents are not merged.
-- `public/app.js` — PostZen UI, method selection, processing bridge and publishing workflow.
+- `public/app.js` — PostZen UI, method selection, browser-native video preview and publishing workflow.
 - `server.js` — verification, PostZen API, Upstash storage, Kuronai proxy and native FFmpeg endpoint.
 
 ## Publishing workflow
@@ -26,7 +26,7 @@ This project keeps the two supplied websites as separate HTML documents. The Pos
 - **HD** — uses the existing Kuronai HQ server upload route (`/upload/`) and deliberately omits `encode_video`, matching the supplied Kuronai extension HQ mode. The access ID remains server-side.
 - **FFmpeg** — native server-side FFmpeg stream-copy remux through `/api/process/ffmpeg`. It uses `-c copy`, does not re-encode, and does not download FFmpeg WebAssembly or a browser worker. It accepts MP4, MOV and M4V containers subject to codec/container compatibility. During the FFmpeg compute stage the progress bar uses an indeterminate animation because this endpoint returns a binary response rather than exact per-frame progress; transfer progress is measured.
 
-`public/video-lab.html` also keeps its FPS Studio UI, which now calls the same native FFmpeg endpoint for timestamp scaling. This is timestamp scaling, not AI frame interpolation or motion-compensated frame generation.
+`public/video-lab.html` also keeps its FPS Studio UI, which calls the native FFmpeg endpoint for timestamp scaling. This is timestamp scaling, not AI frame interpolation or motion-compensated frame generation.
 
 ## Server environment
 
@@ -51,6 +51,13 @@ Render deployment:
 - `apt.txt` requests the native `ffmpeg` package for the Render runtime. On another host, install FFmpeg and ensure it is on `PATH`, or set `FFMPEG_PATH`.
 
 Never put API keys, Redis tokens, session secrets or the Kuronai access ID in `public/` or commit `.env`.
+
+## Video preview and details
+
+- Selecting a video no longer uploads it to the server for inspection. The browser reads duration and dimensions from its native video decoder and extracts cover thumbnails locally with a video element and canvas.
+- This path does not run FFprobe or FFmpeg and begins as soon as browser metadata is available.
+- Exact average FPS and stream bitrate are not exposed by the standard browser video metadata API, so the UI labels them as unavailable instead of displaying guessed values. WebCodecs decodes encoded chunks but does not parse MP4/MOV containers by itself; accurate FPS/bitrate extraction through WebCodecs would still require a container demuxer.
+- Native FFmpeg remains available for the separate server-side processing and timestamp-scaling workflows.
 
 ## Caption watermark
 
