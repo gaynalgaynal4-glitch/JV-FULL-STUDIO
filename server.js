@@ -87,6 +87,15 @@ function getSession(req) {
   } catch { return null; }
 }
 
+// Video inspection only needs a previously verified, signed JV session. It must not
+// depend on Redis/PostZen readiness or call the remote JV bot for every video upload.
+function requireSession(req, res, next) {
+  const identity = getSession(req);
+  if (!identity) return res.status(401).json({ error: "Your JV session is missing or expired. Sign in again, then select the video." });
+  req.identity = identity;
+  next();
+}
+
 async function verifyWithExistingJVBot(identity) {
   const url = `${VERIFY_API}/verify/${encodeURIComponent(identity.uid)}/${encodeURIComponent(identity.browserToken)}`;
   const response = await fetch(url, {
@@ -191,7 +200,7 @@ app.post("/api/auth/verify", ensureReady, requireVerified, async (req, res, next
 app.get("/api/me", ensureReady, requireVerified, async (req, res, next) => {
   try {
     const record = await ensureUser(req.identity.uid);
-    res.json({ uid: req.identity.uid, profileReady: Boolean(record.postzenProfileId) });
+    res.json({ uid: req.identity.uid, profileReady: Boolean(record.postzenProfileId), sessionToken: req.sessionToken });
   } catch (error) { next(error); }
 });
 
@@ -252,7 +261,7 @@ const upload = multer({
 });
 
 // Server-side FFprobe metadata inspection and FFmpeg cover-frame extraction.
-app.post("/api/video/inspect", ensureReady, requireVerified, upload.single("file"), async (req, res, next) => {
+app.post("/api/video/inspect", requireSession, upload.single("file"), async (req, res, next) => {
   const input = req.file;
   const generated = [];
   try {
@@ -267,8 +276,9 @@ app.post("/api/video/inspect", ensureReady, requireVerified, upload.single("file
       child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8");
       child.stdout.on("data", chunk => { stdout = (stdout + chunk).slice(-2_000_000); });
       child.stderr.on("data", chunk => { stderr = (stderr + chunk).slice(-12_000); });
-      child.once("error", error => reject(error.code === "ENOENT" ? new Error(`${command} is not installed on this server. Ensure FFmpeg/FFprobe is included in the Render build.`) : error));
-      child.once("close", code => code === 0 ? resolve(stdout) : reject(new Error(`${command} failed: ${stderr.trim().slice(-1600) || "unsupported video"}`)));
+      const timeout = setTimeout(() => { child.kill("SIGKILL"); reject(new Error(`${command} timed out while inspecting this video. Try again or use a shorter video.`)); }, 90000);
+      child.once("error", error => { clearTimeout(timeout); reject(error.code === "ENOENT" ? new Error(`${command} is not installed on this server. Ensure FFmpeg/FFprobe is included in the Render build.`) : error); });
+      child.once("close", code => { clearTimeout(timeout); code === 0 ? resolve(stdout) : reject(new Error(`${command} failed: ${stderr.trim().slice(-1600) || "unsupported video"}`)); });
     });
     const raw = await run(process.env.FFPROBE_PATH || "ffprobe", ["-v", "error", "-show_streams", "-show_format", "-of", "json", input.path]);
     const probe = JSON.parse(raw);
