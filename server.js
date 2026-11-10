@@ -120,6 +120,19 @@ async function ensureReady(_req, res, next) {
   next();
 }
 
+function safeTelegramProfile(verification) {
+  const user = verification?.telegramProfile || verification?.profile || verification?.user || verification?.telegramUser || {};
+  const firstName = user.first_name || user.firstName || "";
+  const username = user.username || "";
+  const displayName = [firstName].filter(Boolean).join(" ") || username || "Telegram account";
+  const photoUrl = user.photoUrl || user.photo_url || user.avatarUrl || user.avatar_url || user.profile_photo_url || null;
+  return {
+    displayName: String(displayName).slice(0, 80),
+    username: String(username).slice(0, 64),
+    photoUrl: typeof photoUrl === "string" && /^https:\/\//i.test(photoUrl) ? photoUrl : null
+  };
+}
+
 async function requireVerified(req, res, next) {
   try {
     const identity = getSession(req) || getIdentity(req);
@@ -133,6 +146,7 @@ async function requireVerified(req, res, next) {
       });
     }
     req.identity = identity;
+    req.verification = verification;
     req.sessionToken = signedSession(identity);
     next();
   } catch (error) {
@@ -192,7 +206,8 @@ app.post("/api/auth/verify", ensureReady, requireVerified, async (req, res, next
       ok: true,
       uid: req.identity.uid,
       sessionToken: req.sessionToken,
-      profileReady: Boolean(record.postzenProfileId)
+      profileReady: Boolean(record.postzenProfileId),
+      telegramProfile: safeTelegramProfile(req.verification)
     });
   } catch (error) { next(error); }
 });
@@ -200,7 +215,7 @@ app.post("/api/auth/verify", ensureReady, requireVerified, async (req, res, next
 app.get("/api/me", ensureReady, requireVerified, async (req, res, next) => {
   try {
     const record = await ensureUser(req.identity.uid);
-    res.json({ uid: req.identity.uid, profileReady: Boolean(record.postzenProfileId), sessionToken: req.sessionToken });
+    res.json({ uid: req.identity.uid, profileReady: Boolean(record.postzenProfileId), sessionToken: req.sessionToken, telegramProfile: safeTelegramProfile(req.verification) });
   } catch (error) { next(error); }
 });
 
@@ -249,6 +264,24 @@ app.get("/api/accounts", ensureReady, requireVerified, async (req, res, next) =>
     const accounts = data.accounts || data.data || [];
     await redis.set(`${userKey(req.identity.uid)}:accounts`, accounts);
     res.json({ accounts });
+  } catch (error) { next(error); }
+});
+
+app.delete("/api/accounts/:accountId", ensureReady, requireVerified, async (req, res, next) => {
+  try {
+    const record = await ensureUser(req.identity.uid);
+    const accountId = String(req.params.accountId || "");
+    if (!/^[a-zA-Z0-9_-]{6,100}$/.test(accountId)) {
+      return res.status(400).json({ error: "Invalid TikTok account ID." });
+    }
+    // Verify ownership against this Telegram user's PostZen profile before disconnecting.
+    const data = await postzen(`/v1/accounts?profileId=${encodeURIComponent(record.postzenProfileId)}`);
+    const accounts = data.accounts || data.data || [];
+    const owned = accounts.some(account => String(account._id || account.id) === accountId);
+    if (!owned) return res.status(404).json({ error: "This account is not connected to your workspace." });
+    await postzen(`/v1/accounts/${encodeURIComponent(accountId)}`, { method: "DELETE" });
+    await redis.del(`${userKey(req.identity.uid)}:accounts`);
+    res.json({ ok: true });
   } catch (error) { next(error); }
 });
 
