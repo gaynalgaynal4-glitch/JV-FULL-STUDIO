@@ -13,7 +13,7 @@ This project keeps the two supplied websites as separate HTML documents. The Pos
 
 1. Verify the Telegram UID with the existing JV bot verification service.
 2. Connect a TikTok account through PostZen.
-3. Open **⚙ Processing method** and select Enhanced, Local or FFmpeg.
+3. Open **⚙ Processing method** and select Enhanced, HD, Local, FFmpeg or Only Upload.
 4. Choose a video, enter the caption and choose draft, publish or schedule.
 5. PostZen sends the video to the selected Video Lab method.
 6. The processed MP4 is returned to PostZen and uploaded to PostZen media storage.
@@ -23,6 +23,7 @@ This project keeps the two supplied websites as separate HTML documents. The Pos
 
 - **Enhanced** — Video Lab's enhanced server flow, proxied through `/api/process/jarvis?enhanced=1`. The Kuronai access ID is only read from the server environment variable `KURONAI_TG_ID`; it is not shipped in browser JavaScript. The current enhanced upload limit is 60 MB.
 - **Local** — Video Lab's browser MP4 patcher. The source video is processed in the browser; the processed Blob is then sent to PostZen for publishing. The supplied patcher supports MP4 with AVC/H.264 or HEVC/H.265 video.
+- **HD** — uses the existing Kuronai HQ server upload route (`/upload/`) and deliberately omits `encode_video`, matching the supplied Kuronai extension HQ mode. The access ID remains server-side.
 - **FFmpeg** — native server-side FFmpeg stream-copy remux through `/api/process/ffmpeg`. It uses `-c copy`, does not re-encode, and does not download FFmpeg WebAssembly or a browser worker. It accepts MP4, MOV and M4V containers subject to codec/container compatibility. During the FFmpeg compute stage the progress bar uses an indeterminate animation because this endpoint returns a binary response rather than exact per-frame progress; transfer progress is measured.
 
 `public/video-lab.html` also keeps its FPS Studio UI, which now calls the same native FFmpeg endpoint for timestamp scaling. This is timestamp scaling, not AI frame interpolation or motion-compensated frame generation.

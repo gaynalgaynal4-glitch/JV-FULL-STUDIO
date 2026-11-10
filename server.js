@@ -323,12 +323,17 @@ app.post("/api/process/jarvis", ensureReady, requireVerified, upload.single("fil
     if (!file) return res.status(400).json({ error: "Choose a video file first." });
     if (file.size > KURONAI_MAX_BYTES) return res.status(413).json({ error: "Kuronai processing is limited to 60 MB per video." });
     const enhanced = String(req.query.enhanced || "0") === "1";
+    const hq = String(req.query.hd || "0") === "1";
+    const hqReencode = String(req.query.reencode || "1") !== "0";
     const form = new FormData();
     const bytes = await fs.promises.readFile(file.path);
     form.append("file", new Blob([bytes], { type: file.mimetype || "video/mp4" }), file.originalname);
     form.append("tg_id", KURONAI_TG_ID);
     form.append("progress", "true");
-    if (!enhanced) form.append("encode_video", "false");
+    // Kuronai HQ mode uses /upload/. Re-encoding ON omits encode_video
+    // (HQ server default); OFF explicitly sends false. Standard patch mode
+    // always disables re-encoding.
+    if (!enhanced && (!hq || !hqReencode)) form.append("encode_video", "false");
     const upstream = await fetch(`${KURONAI_API}${enhanced ? "/uploaden/" : "/upload/"}`, {
       method: "POST", body: form, signal: AbortSignal.timeout(30 * 60 * 1000)
     });
@@ -399,6 +404,7 @@ app.post("/api/posts", ensureReady, requireVerified, upload.single("video"), asy
   };
   try {
     if (!file) return res.status(400).json({ error: "Choose a video file first." });
+    if (req.body.musicRights !== "true" || req.body.videoRights !== "true") return res.status(400).json({ error: "Tick both the music copyright and video copyright boxes first." });
     startProgressStream();
     sendProgress("profile", 3, "Checking your private PostZen profile…");
     const record = await ensureUser(req.identity.uid);
@@ -427,7 +433,12 @@ app.post("/api/posts", ensureReady, requireVerified, upload.single("video"), asy
         accountId,
         settings: mode === "draft"
           ? { uploadAsDraft: true }
-          : { privacyLevel: req.body.privacyLevel || "publicToEveryone" }
+          : {
+              privacyLevel: ["publicToEveryone", "mutualFollowFriends", "selfOnly"].includes(req.body.privacyLevel) ? req.body.privacyLevel : "publicToEveryone",
+              allowComment: req.body.allowComment !== "false",
+              allowDuet: req.body.allowDuet !== "false",
+              allowStitch: req.body.allowStitch !== "false"
+            }
       }]
     };
     if (mode === "publish") postBody.publishNow = true;
