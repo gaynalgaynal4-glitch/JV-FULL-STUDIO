@@ -62,9 +62,28 @@ function setProfileDisplay(profile = {}) {
   $("telegramDisplayName").textContent = name;
   const avatar = $("telegramAvatar");
   const photo = profile.photoUrl || profile.photo_url || profile.avatarUrl || profile.avatar_url || profile.photo || profile.avatar;
-  if (typeof photo === "string" && /^https:\/\//i.test(photo)) {
-    avatar.src = photo;
+  if (typeof photo === "string" && (photo.startsWith("/") || /^https:\/\//i.test(photo))) {
     avatar.classList.add("has-photo");
+    const headers = new Headers();
+    if (identity?.uid) headers.set("X-JV-Telegram-UID", identity.uid);
+    if (identity?.browserToken) headers.set("X-JV-Browser-Token", identity.browserToken);
+    if (sessionToken) headers.set("Authorization", `Bearer ${sessionToken}`);
+    fetch(photo, { headers, credentials: "same-origin" })
+      .then(response => {
+        if (!response.ok) throw new Error("Profile photo unavailable");
+        return response.blob();
+      })
+      .then(blob => {
+        if (avatar.dataset.photoObjectUrl) URL.revokeObjectURL(avatar.dataset.photoObjectUrl);
+        const objectUrl = URL.createObjectURL(blob);
+        avatar.dataset.photoObjectUrl = objectUrl;
+        avatar.src = objectUrl;
+      })
+      .catch(() => {
+        avatar.removeAttribute("src");
+        avatar.classList.remove("has-photo");
+        avatar.alt = "Telegram profile photo unavailable";
+      });
   } else {
     avatar.removeAttribute("src");
     avatar.classList.remove("has-photo");
@@ -102,6 +121,7 @@ async function verifyUID(uid, silent = false) {
     const result = await api("/api/auth/verify", { method: "POST" });
     localStorage.setItem(STORAGE_UID, uid);
     if (result.sessionToken) sessionToken = result.sessionToken;
+    setProfileDisplay(result.telegramProfile || {});
     $("loginMessage").classList.add("hidden");
     showDashboard();
     return true;
@@ -129,7 +149,8 @@ async function refreshAuth() {
   identity = { uid: savedUID, browserToken: browserToken() };
   sessionToken = localStorage.getItem(STORAGE_SESSION);
   try {
-    await api("/api/me");
+    const me = await api("/api/me");
+    setProfileDisplay(me.telegramProfile || {});
     showDashboard();
   } catch {
     sessionToken = null;
