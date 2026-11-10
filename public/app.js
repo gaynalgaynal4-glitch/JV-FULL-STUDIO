@@ -370,7 +370,7 @@ $("caption").addEventListener("input", () => $("captionCount").textContent = $("
 let previewObjectUrl = null;
 let previewLoadId = 0;
 let coverDuration = 0;
-let coverThumbTimes = [];
+let browserCoverFrames = [];
 
 function formatBytes(bytes) {
   if (!Number.isFinite(bytes) || bytes < 0) return "—";
@@ -394,67 +394,89 @@ function drawCoverFrame(video, canvas) {
   ctx.drawImage(video, (w - dw) / 2, (h - dh) / 2, dw, dh);
   return true;
 }
-function seekVideo(video, time) {
+function seekVideo(video, time, id) {
   return new Promise(resolve => {
-    const target = Math.max(0, Math.min(time, Math.max(0, video.duration - 0.05)));
-    if (Math.abs(video.currentTime - target) < 0.04 && video.readyState >= 2) return resolve();
-    const done = () => { video.removeEventListener("seeked", done); resolve(); };
-    video.addEventListener("seeked", done, { once: true });
-    video.currentTime = target;
-    setTimeout(done, 1800);
+    if (id !== previewLoadId) return resolve(false);
+    const target = Math.max(0, Math.min(time, Math.max(0, video.duration - 0.08)));
+    if (Math.abs(video.currentTime - target) < 0.04 && video.readyState >= 2) return resolve(true);
+    let settled = false;
+    const finish = ok => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      video.removeEventListener("seeked", onSeeked);
+      video.removeEventListener("error", onError);
+      resolve(ok && id === previewLoadId);
+    };
+    const onSeeked = () => finish(true);
+    const onError = () => finish(false);
+    const timer = setTimeout(() => finish(false), 2500);
+    video.addEventListener("seeked", onSeeked, { once: true });
+    video.addEventListener("error", onError, { once: true });
+    try { video.currentTime = target; } catch { finish(false); }
   });
 }
-let serverCoverFrames = [];
-function paintServerCover(frame) {
+function paintBrowserCover(frame) {
   if (!frame?.dataUrl) return;
   const canvas = $("coverCanvas"), ctx = canvas.getContext("2d");
   const image = new Image();
   image.onload = () => { ctx.clearRect(0, 0, canvas.width, canvas.height); ctx.drawImage(image, 0, 0, canvas.width, canvas.height); };
   image.src = frame.dataUrl;
 }
-function selectServerCover(index, id = previewLoadId) {
-  if (id !== previewLoadId || !serverCoverFrames.length) return;
-  const frame = serverCoverFrames[Math.max(0, Math.min(serverCoverFrames.length - 1, index))];
+function selectBrowserCover(index, id = previewLoadId) {
+  if (id !== previewLoadId || !browserCoverFrames.length) return;
+  const frame = browserCoverFrames[Math.max(0, Math.min(browserCoverFrames.length - 1, index))];
   $("coverTime").value = String(frame.time);
   $("coverTimeLabel").textContent = `${frame.time.toFixed(1)}s`;
   $("coverThumbnails").querySelectorAll(".cover-thumb").forEach((el, i) => el.classList.toggle("active", i === index));
-  paintServerCover(frame);
+  paintBrowserCover(frame);
 }
-async function inspectVideoOnServer(file, id) {
-  const form = new FormData(); form.append("file", file, file.name);
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 240000);
-  let data;
-  try {
-    data = await api("/api/video/inspect", { method: "POST", body: form, signal: controller.signal });
-  } catch (error) {
-    if (error.name === "AbortError") throw new Error("The JV server took too long to inspect this video. Check that the latest server build is deployed and FFmpeg is installed.");
-    throw error;
-  } finally {
-    clearTimeout(timeout);
-  }
+async function inspectVideoInBrowser(file, id) {
+  const video = $("selectedVideoPreview");
+  const metadataReady = () => new Promise((resolve, reject) => {
+    if (video.readyState >= 1 && Number.isFinite(video.duration)) return resolve();
+    const done = () => { cleanup(); resolve(); };
+    const fail = () => { cleanup(); reject(new Error("This browser cannot read the selected video's metadata.")); };
+    const cleanup = () => { video.removeEventListener("loadedmetadata", done); video.removeEventListener("error", fail); };
+    video.addEventListener("loadedmetadata", done, { once: true });
+    video.addEventListener("error", fail, { once: true });
+  });
+  await metadataReady();
   if (id !== previewLoadId) return;
-  coverDuration = Number(data.duration || 0);
-  $("videoResolution").textContent = data.width && data.height ? `${data.width} × ${data.height}` : "Unavailable";
-  $("videoFps").textContent = Number(data.fps) > 0 ? `${Number(data.fps).toFixed(3)} FPS` : "Unavailable";
+  coverDuration = Number.isFinite(video.duration) ? video.duration : 0;
+  $("videoResolution").textContent = video.videoWidth && video.videoHeight ? `${video.videoWidth} × ${video.videoHeight}` : "Unavailable";
   $("videoDuration").textContent = formatDuration(coverDuration);
-  const bitrate = Number(data.videoBitrate || data.totalBitrate || 0);
-  $("videoBitrate").textContent = bitrate > 0 ? `${Math.round(bitrate / 1000)} kbps` : "Unavailable";
+  // HTML video metadata does not expose exact average FPS or stream bitrate.
+  // Do not guess these values; WebCodecs also requires a container demuxer.
+  $("videoFps").textContent = "Not exposed by browser";
+  $("videoBitrate").textContent = "Not exposed by browser";
   $("coverTime").max = String(Math.max(0, coverDuration));
-  serverCoverFrames = data.thumbnails || [];
-  if (serverCoverFrames[0]?.dataUrl) $("selectedVideoPreview").poster = serverCoverFrames[0].dataUrl;
+  $("coverTimeLabel").textContent = "Creating previews…";
+  browserCoverFrames = [];
   const holder = $("coverThumbnails"); holder.replaceChildren();
-  serverCoverFrames.forEach((frame, index) => {
+  const times = coverDuration > 0 ? [0, .25, .5, .75, .95].map(f => Math.max(0, Math.min(coverDuration - .08, coverDuration * f))) : [0];
+  const canvas = document.createElement("canvas"); canvas.width = 480; canvas.height = 270;
+  for (const time of times) {
+    if (id !== previewLoadId) return;
+    const ok = await seekVideo(video, time, id);
+    if (!ok || !drawCoverFrame(video, canvas)) continue;
+    const dataUrl = canvas.toDataURL("image/jpeg", .82);
+    const frame = { time, dataUrl };
+    browserCoverFrames.push(frame);
     const button = document.createElement("button");
     button.type = "button"; button.className = "cover-thumb";
-    button.setAttribute("aria-label", `Select cover at ${frame.time.toFixed(1)} seconds`);
-    const image = document.createElement("img"); image.src = frame.dataUrl; image.alt = `Video frame at ${frame.time.toFixed(1)} seconds`;
+    button.setAttribute("aria-label", `Select cover at ${time.toFixed(1)} seconds`);
+    const image = document.createElement("img"); image.src = dataUrl; image.alt = `Video frame at ${time.toFixed(1)} seconds`;
     button.append(image);
-    button.addEventListener("click", () => selectServerCover(index, id));
+    const index = browserCoverFrames.length - 1;
+    button.addEventListener("click", () => selectBrowserCover(index, id));
     holder.append(button);
-  });
-  if (serverCoverFrames.length) selectServerCover(0, id);
-  else $("coverTimeLabel").textContent = "No frames available";
+  }
+  if (id !== previewLoadId) return;
+  if (browserCoverFrames.length) selectBrowserCover(0, id);
+  else $("coverTimeLabel").textContent = "Preview frames unavailable";
+  // Restore playback position after thumbnail extraction.
+  try { video.currentTime = 0; } catch {}
 }
 function clearVideoPreview() {
   previewLoadId++;
@@ -464,7 +486,7 @@ function clearVideoPreview() {
   $("dropzone")?.classList.remove("hidden");
   $("fileName").textContent = "Choose a video";
   $("coverThumbnails").replaceChildren();
-  serverCoverFrames = [];
+  browserCoverFrames = [];
   $("selectedVideoPreview").removeAttribute("src");
   $("selectedVideoPreview").load();
 }
@@ -486,34 +508,31 @@ $("videoFile").addEventListener("change", async () => {
   $("previewFileName").textContent = file.name;
   $("previewFileSize").textContent = formatBytes(file.size);
   $("videoResolution").textContent = "Reading…";
-  $("videoFps").textContent = "Checking…";
+  $("videoFps").textContent = "—";
   $("videoDuration").textContent = "Reading…";
-  $("videoBitrate").textContent = "Calculating…";
+  $("videoBitrate").textContent = "—";
   const video = $("selectedVideoPreview");
   video.src = previewObjectUrl;
   video.load();
-  video.onerror = () => {
-    if (id === previewLoadId) video.poster = serverCoverFrames[0]?.dataUrl || "";
-  };
-  inspectVideoOnServer(file, id).catch(error => {
+  inspectVideoInBrowser(file, id).catch(error => {
     if (id !== previewLoadId) return;
-    const reason = error.message || "Server inspection failed.";
-    $("videoResolution").textContent = "Failed";
-    $("videoFps").textContent = "Failed";
-    $("videoDuration").textContent = "Failed";
-    $("videoBitrate").textContent = "Failed";
-    $("coverTimeLabel").textContent = "Cover frames unavailable";
-    toast(`Video inspection failed: ${reason}`);
+    const reason = error.message || "Browser inspection failed.";
+    $("videoResolution").textContent = "Unavailable";
+    $("videoFps").textContent = "Not exposed by browser";
+    $("videoDuration").textContent = "Unavailable";
+    $("videoBitrate").textContent = "Not exposed by browser";
+    $("coverTimeLabel").textContent = "Preview unavailable";
+    toast(`Video preview: ${reason}`);
   });
 });
 $("coverTime").addEventListener("input", event => {
-  if (!serverCoverFrames.length) return;
+  if (!browserCoverFrames.length) return;
   const target = Number(event.target.value);
   let nearest = 0;
-  for (let i = 1; i < serverCoverFrames.length; i++) {
-    if (Math.abs(serverCoverFrames[i].time - target) < Math.abs(serverCoverFrames[nearest].time - target)) nearest = i;
+  for (let i = 1; i < browserCoverFrames.length; i++) {
+    if (Math.abs(browserCoverFrames[i].time - target) < Math.abs(browserCoverFrames[nearest].time - target)) nearest = i;
   }
-  selectServerCover(nearest);
+  selectBrowserCover(nearest);
 });
 {
   const dz = document.querySelector(".dropzone");
