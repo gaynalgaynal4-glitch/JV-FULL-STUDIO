@@ -57,6 +57,20 @@ function toast(message) {
   el.classList.remove("hidden");
   setTimeout(() => el.classList.add("hidden"), 3200);
 }
+function setProfileDisplay(profile = {}) {
+  const name = profile.displayName || profile.first_name || profile.username || "Telegram account";
+  $("telegramDisplayName").textContent = name;
+  const avatar = $("telegramAvatar");
+  const photo = profile.photoUrl || profile.photo_url || profile.avatarUrl || profile.avatar_url || profile.photo || profile.avatar;
+  if (typeof photo === "string" && /^https:\/\//i.test(photo)) {
+    avatar.src = photo;
+    avatar.classList.add("has-photo");
+  } else {
+    avatar.removeAttribute("src");
+    avatar.classList.remove("has-photo");
+    avatar.alt = "Telegram profile photo unavailable";
+  }
+}
 function showDashboard() {
   $("loginView").classList.add("hidden");
   $("appView").classList.remove("hidden");
@@ -144,9 +158,28 @@ async function loadAccounts() {
       const handle = account.username ? `@${account.username}` : "TikTok";
       const item = document.createElement("div");
       item.className = "account-item";
-      item.innerHTML = '<div class="account-left"><span class="tt-icon">♪</span><div><b></b><small></small></div></div><span class="history-status">Connected</span>';
+      const avatarUrl = account.avatarUrl || account.avatar_url || account.profilePictureUrl || account.profile_picture_url || account.avatar || account.picture;
+      item.innerHTML = '<div class="account-left"><img class="account-avatar" alt="TikTok profile photo"><div><b></b><small></small></div></div><div class="account-actions"><span class="history-status">Connected</span><button class="button danger disconnect-account" type="button">Disconnect</button></div>';
+      const avatar = item.querySelector(".account-avatar");
+      if (typeof avatarUrl === "string" && /^https:\/\//i.test(avatarUrl)) avatar.src = avatarUrl;
+      else avatar.classList.add("avatar-fallback");
       item.querySelector("b").textContent = name;
       item.querySelector("small").textContent = handle;
+      item.querySelector(".disconnect-account").addEventListener("click", async () => {
+        if (!window.confirm(`Disconnect ${name} from this JV workspace?`)) return;
+        const button = item.querySelector(".disconnect-account");
+        button.disabled = true;
+        button.textContent = "Disconnecting…";
+        try {
+          await api(`/api/accounts/${encodeURIComponent(id)}`, { method: "DELETE" });
+          toast("TikTok account disconnected.");
+          await loadAccounts();
+        } catch (error) {
+          toast(error.message);
+          button.disabled = false;
+          button.textContent = "Disconnect";
+        }
+      });
       list.appendChild(item);
       const option = document.createElement("option");
       option.value = id;
