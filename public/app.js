@@ -253,7 +253,7 @@ function uploadPostWithProgress(form, onProgress, onServerProgress) {
         } else if (item.type === "complete") {
           finalResult = item.result || { ok: true, message: item.message };
         } else if (item.type === "error" || item.error) {
-          serverError = item.error || "PostZen publishing failed.";
+          serverError = item.error || "TikTok publishing failed.";
         }
         // Also accept a normal JSON success response if a host/proxy buffers
         // or normalizes the NDJSON stream.
@@ -265,7 +265,7 @@ function uploadPostWithProgress(form, onProgress, onServerProgress) {
     if (identity?.browserToken) xhr.setRequestHeader("X-JV-Browser-Token", identity.browserToken);
     if (sessionToken) xhr.setRequestHeader("Authorization", `Bearer ${sessionToken}`);
     xhr.upload.onprogress = event => { if (event.lengthComputable) onProgress(Math.round(event.loaded / event.total * 100)); };
-    xhr.upload.onload = () => onServerProgress?.({ type:"progress", stage:"server_receive", percent:0, message:"Processed video received by JV PostZen. Preparing media storage…" });
+    xhr.upload.onload = () => onServerProgress?.({ type:"progress", stage:"server_receive", percent:0, message:"Processed video received by JV TikTok. Preparing media storage…" });
     xhr.onprogress = () => parseProgress();
     xhr.onload = () => {
       parseProgress(true);
@@ -276,12 +276,12 @@ function uploadPostWithProgress(form, onProgress, onServerProgress) {
         const contentType = xhr.getResponseHeader("content-type") || "unknown content type";
         const bodyHint = (xhr.responseText || "").trim().slice(0, 240);
         reject(new Error(data.error || (xhr.status >= 200 && xhr.status < 300
-          ? `PostZen returned HTTP ${xhr.status}, but no completion event was received (${contentType}). ${bodyHint || "The response body was empty."}`
-          : `PostZen upload failed (HTTP ${xhr.status}). ${bodyHint}`)));
+          ? `TikTok returned HTTP ${xhr.status}, but no completion event was received (${contentType}). ${bodyHint || "The response body was empty."}`
+          : `TikTok upload failed (HTTP ${xhr.status}). ${bodyHint}`)));
       }
     };
-    xhr.onerror = () => reject(new Error("Network error while uploading the processed video to PostZen."));
-    xhr.onabort = () => reject(new Error("PostZen upload was cancelled."));
+    xhr.onerror = () => reject(new Error("Network error while uploading the processed video to TikTok."));
+    xhr.onabort = () => reject(new Error("TikTok upload was cancelled."));
     xhr.send(form);
   });
 }
@@ -302,15 +302,29 @@ window.addEventListener("message", event => {
 const videoLabFrame = $("videoLabFrame");
 videoLabFrame.addEventListener("load", () => videoLabFrame.contentWindow?.postMessage({ type: "JV_VIDEO_LAB_PING" }, location.origin));
 videoLabFrame.contentWindow?.postMessage({ type: "JV_VIDEO_LAB_PING" }, location.origin);
-$("methodSettingsBtn").addEventListener("click", () => { updateMethodUI(); $("methodModal").classList.remove("hidden"); });
-$("closeMethodModal").addEventListener("click", () => $("methodModal").classList.add("hidden"));
-$("methodModal").addEventListener("click", event => { if (event.target === $("methodModal")) $("methodModal").classList.add("hidden"); });
+function setMethodModalOpen(open) {
+  const modal = $("methodModal");
+  modal.classList.toggle("hidden", !open);
+  document.body.classList.toggle("method-modal-open", open);
+  if (open) {
+    updateMethodUI();
+    requestAnimationFrame(() => $("closeMethodModal").focus());
+  } else {
+    $("methodSettingsBtn").focus();
+  }
+}
+$("methodSettingsBtn").addEventListener("click", () => setMethodModalOpen(true));
+$("closeMethodModal").addEventListener("click", () => setMethodModalOpen(false));
+$("methodModal").addEventListener("click", event => { if (event.target === $("methodModal")) setMethodModalOpen(false); });
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape" && !$("methodModal").classList.contains("hidden")) setMethodModalOpen(false);
+});
 document.querySelectorAll(".method-choice").forEach(button => button.addEventListener("click", () => {
   selectedMethod = button.dataset.method;
   localStorage.setItem("jv_postzen_processing_method_v1", selectedMethod);
   updateMethodUI();
   if (selectedMethod !== "hd") {
-    $("methodModal").classList.add("hidden");
+    setMethodModalOpen(false);
     toast(`${METHOD_LABELS[selectedMethod]} selected`);
   }
 }));
@@ -320,7 +334,7 @@ $("hdReencodeToggle").addEventListener("change", event => {
   updateMethodUI();
 });
 $("confirmHdMethod").addEventListener("click", () => {
-  $("methodModal").classList.add("hidden");
+  setMethodModalOpen(false);
   toast(`HD METHOD selected · Re-encoding ${hdReencode ? "ON" : "OFF"}`);
 });
 
@@ -331,7 +345,7 @@ $("tgUidInput").addEventListener("keydown", event => {
 $("connectBtn").addEventListener("click", async () => {
   const button = $("connectBtn");
   button.disabled = true;
-  button.textContent = "Opening PostZen…";
+  button.textContent = "Opening TikTok…";
   try {
     const result = await api("/api/connect/tiktok", { method: "POST" });
     location.href = result.authUrl;
@@ -390,70 +404,47 @@ function seekVideo(video, time) {
     setTimeout(done, 1800);
   });
 }
-async function setCoverTime(time, id = previewLoadId) {
-  const video = $("selectedVideoPreview");
-  if (!video.src || id !== previewLoadId) return;
-  const safeTime = Math.max(0, Math.min(Number(time) || 0, Math.max(0, coverDuration - 0.05)));
-  $("coverTime").value = String(safeTime);
-  $("coverTimeLabel").textContent = `${safeTime.toFixed(1)}s`;
-  await seekVideo(video, safeTime);
-  if (id === previewLoadId) drawCoverFrame(video, $("coverCanvas"));
+let serverCoverFrames = [];
+function paintServerCover(frame) {
+  if (!frame?.dataUrl) return;
+  const canvas = $("coverCanvas"), ctx = canvas.getContext("2d");
+  const image = new Image();
+  image.onload = () => { ctx.clearRect(0, 0, canvas.width, canvas.height); ctx.drawImage(image, 0, 0, canvas.width, canvas.height); };
+  image.src = frame.dataUrl;
 }
-async function estimateFrameRate(video, id) {
-  if (!("requestVideoFrameCallback" in video)) return "Unavailable";
-  const originalTime = video.currentTime;
-  let count = 0, first = null, last = null, callbacks = 0;
-  try {
-    video.muted = true;
-    await video.play();
-    await new Promise(resolve => {
-      const started = performance.now();
-      const sample = (_now, metadata) => {
-        if (id !== previewLoadId) return resolve();
-        callbacks++;
-        if (first === null) first = metadata.mediaTime;
-        last = metadata.mediaTime;
-        count++;
-        if (performance.now() - started >= 1100 || callbacks > 90) return resolve();
-        video.requestVideoFrameCallback(sample);
-      };
-      video.requestVideoFrameCallback(sample);
-      setTimeout(resolve, 1500);
-    });
-    video.pause();
-  } catch {}
-  if (id !== previewLoadId) return "—";
-  const fps = last !== null && last > first ? (count - 1) / (last - first) : 0;
-  try { video.currentTime = originalTime; } catch {}
-  return fps > 1 && fps < 241 ? `≈ ${Math.round(fps)} FPS` : "Unavailable";
+function selectServerCover(index, id = previewLoadId) {
+  if (id !== previewLoadId || !serverCoverFrames.length) return;
+  const frame = serverCoverFrames[Math.max(0, Math.min(serverCoverFrames.length - 1, index))];
+  $("coverTime").value = String(frame.time);
+  $("coverTimeLabel").textContent = `${frame.time.toFixed(1)}s`;
+  $("coverThumbnails").querySelectorAll(".cover-thumb").forEach((el, i) => el.classList.toggle("active", i === index));
+  paintServerCover(frame);
 }
-async function buildCoverThumbnails(id) {
-  const video = $("selectedVideoPreview");
-  const holder = $("coverThumbnails");
-  holder.replaceChildren();
-  coverThumbTimes = [];
-  const count = 5;
-  for (let i = 0; i < count; i++) {
-    const time = coverDuration > 0 ? coverDuration * (i + 1) / (count + 1) : 0;
-    coverThumbTimes.push(time);
+async function inspectVideoOnServer(file, id) {
+  const form = new FormData(); form.append("file", file, file.name);
+  const data = await api("/api/video/inspect", { method: "POST", body: form });
+  if (id !== previewLoadId) return;
+  coverDuration = Number(data.duration || 0);
+  $("videoResolution").textContent = data.width && data.height ? `${data.width} × ${data.height}` : "Unavailable";
+  $("videoFps").textContent = Number(data.fps) > 0 ? `${Number(data.fps).toFixed(3)} FPS` : "Unavailable";
+  $("videoDuration").textContent = formatDuration(coverDuration);
+  const bitrate = Number(data.videoBitrate || data.totalBitrate || 0);
+  $("videoBitrate").textContent = bitrate > 0 ? `${Math.round(bitrate / 1000)} kbps` : "Unavailable";
+  $("coverTime").max = String(Math.max(0, coverDuration));
+  serverCoverFrames = data.thumbnails || [];
+  if (serverCoverFrames[0]?.dataUrl) $("selectedVideoPreview").poster = serverCoverFrames[0].dataUrl;
+  const holder = $("coverThumbnails"); holder.replaceChildren();
+  serverCoverFrames.forEach((frame, index) => {
     const button = document.createElement("button");
     button.type = "button"; button.className = "cover-thumb";
-    button.setAttribute("aria-label", `Select cover at ${time.toFixed(1)} seconds`);
-    const canvas = document.createElement("canvas"); canvas.width = 160; canvas.height = 90;
-    button.append(canvas);
-    button.addEventListener("click", () => {
-      holder.querySelectorAll(".cover-thumb").forEach(el => el.classList.remove("active"));
-      button.classList.add("active");
-      setCoverTime(time, id);
-    });
+    button.setAttribute("aria-label", `Select cover at ${frame.time.toFixed(1)} seconds`);
+    const image = document.createElement("img"); image.src = frame.dataUrl; image.alt = `Video frame at ${frame.time.toFixed(1)} seconds`;
+    button.append(image);
+    button.addEventListener("click", () => selectServerCover(index, id));
     holder.append(button);
-    await seekVideo(video, time);
-    if (id !== previewLoadId) return;
-    drawCoverFrame(video, canvas);
-  }
-  const first = holder.querySelector(".cover-thumb");
-  if (first) first.classList.add("active");
-  await setCoverTime(0, id);
+  });
+  if (serverCoverFrames.length) selectServerCover(0, id);
+  else $("coverTimeLabel").textContent = "No frames available";
 }
 function clearVideoPreview() {
   previewLoadId++;
@@ -463,6 +454,7 @@ function clearVideoPreview() {
   $("dropzone")?.classList.remove("hidden");
   $("fileName").textContent = "Choose a video";
   $("coverThumbnails").replaceChildren();
+  serverCoverFrames = [];
   $("selectedVideoPreview").removeAttribute("src");
   $("selectedVideoPreview").load();
 }
@@ -490,26 +482,26 @@ $("videoFile").addEventListener("change", async () => {
   const video = $("selectedVideoPreview");
   video.src = previewObjectUrl;
   video.load();
-  video.onloadedmetadata = async () => {
-    if (id !== previewLoadId) return;
-    coverDuration = Number.isFinite(video.duration) ? video.duration : 0;
-    $("videoResolution").textContent = `${video.videoWidth} × ${video.videoHeight}`;
-    $("videoDuration").textContent = formatDuration(video.duration);
-    const bitrate = coverDuration > 0 ? (file.size * 8 / coverDuration) / 1000 : 0;
-    $("videoBitrate").textContent = bitrate > 0 ? `≈ ${Math.round(bitrate)} kbps` : "Unavailable";
-    $("coverTime").max = String(Math.max(0, coverDuration));
-    $("coverTime").value = "0";
-    await buildCoverThumbnails(id);
-    const fps = await estimateFrameRate(video, id);
-    if (id === previewLoadId) $("videoFps").textContent = fps;
-  };
   video.onerror = () => {
-    if (id === previewLoadId) toast("This browser could not read the selected video preview.");
+    if (id === previewLoadId) video.poster = serverCoverFrames[0]?.dataUrl || "";
   };
+  inspectVideoOnServer(file, id).catch(error => {
+    if (id !== previewLoadId) return;
+    $("videoResolution").textContent = "Unavailable";
+    $("videoFps").textContent = "Unavailable";
+    $("videoDuration").textContent = "Unavailable";
+    $("videoBitrate").textContent = "Unavailable";
+    toast(`Server video inspection failed: ${error.message}`);
+  });
 });
 $("coverTime").addEventListener("input", event => {
-  $("coverThumbnails").querySelectorAll(".cover-thumb").forEach(el => el.classList.remove("active"));
-  setCoverTime(event.target.value);
+  if (!serverCoverFrames.length) return;
+  const target = Number(event.target.value);
+  let nearest = 0;
+  for (let i = 1; i < serverCoverFrames.length; i++) {
+    if (Math.abs(serverCoverFrames[i].time - target) < Math.abs(serverCoverFrames[nearest].time - target)) nearest = i;
+  }
+  selectServerCover(nearest);
 });
 {
   const dz = document.querySelector(".dropzone");
@@ -548,7 +540,7 @@ $("publishForm").addEventListener("submit", async event => {
       if (!processed?.blob?.size) throw new Error("The selected method returned an empty processed video.");
       videoToUpload = processed.blob;
       uploadFileName = processed.fileName || file.name.replace(/\.[^.]+$/, "") + "_processed.mp4";
-      showWorkflow("Video processing complete", 100, "Preparing the processed file for PostZen.");
+      showWorkflow("Video processing complete", 100, "Preparing the processed file for TikTok.");
     }
 
     const form = new FormData();
@@ -564,10 +556,10 @@ $("publishForm").addEventListener("submit", async event => {
     form.append("videoRights", $("videoRights").checked);
     if (mode === "schedule") form.append("scheduledFor", new Date($("scheduleTime").value).toISOString());
 
-    showWorkflow("Uploading video to PostZen…", 0, selectedMethod === "upload" ? "The original file is being sent unchanged to your existing JV server, then uploaded to PostZen." : "The selected processing method has finished. PostZen media upload is now running.");
-    const result = await uploadPostWithProgress(form, pct => showWorkflow(`Uploading to JV PostZen server · ${pct}%`, Math.min(10, pct * 0.10), "Sending the processed MP4 from your browser to JV PostZen."), event => showWorkflow(event.message || "PostZen is processing the upload…", event.stage === "server_receive" ? 10 : 10 + (event.percent ?? 0) * 0.90, event.stage || "PostZen media upload and publishing."));
-    showWorkflow("Post submitted successfully", 100, result.message || "PostZen accepted the TikTok post request.");
-    notice($("publishMessage"), result.message || "Processed video submitted to PostZen.");
+    showWorkflow("Uploading video to TikTok…", 0, selectedMethod === "upload" ? "The original file is being sent unchanged to your existing JV server, then uploaded to TikTok." : "The selected processing method has finished. TikTok media upload is now running.");
+    const result = await uploadPostWithProgress(form, pct => showWorkflow(`Uploading to JV TikTok server · ${pct}%`, Math.min(10, pct * 0.10), "Sending the processed MP4 from your browser to JV TikTok."), event => showWorkflow(event.message || "TikTok is processing the upload…", event.stage === "server_receive" ? 10 : 10 + (event.percent ?? 0) * 0.90, event.stage || "TikTok media upload and publishing."));
+    showWorkflow("Post submitted successfully", 100, result.message || "TikTok accepted the TikTok post request.");
+    notice($("publishMessage"), result.message || "Processed video submitted to TikTok.");
     $("publishForm").reset();
     $("captionCount").textContent = "0";
     clearVideoPreview();

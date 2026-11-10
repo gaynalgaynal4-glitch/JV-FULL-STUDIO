@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#090d18">
-  <title>JV Studio — PostZen Publisher</title>
+  <title>JV Studio — TikTok Publisher</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
@@ -14,7 +14,7 @@
 <body>
   <div class="ambient ambient-one"></div><div class="ambient ambient-two"></div>
   <header class="topbar">
-    <a class="brand" href="/"><span class="brand-mark">JV</span><span>JV <b>STUDIO</b><small>POSTZEN PUBLISHER</small></span></a>
+    <a class="brand" href="/"><span class="brand-mark">JV</span><span>JV <b>STUDIO</b><small>TIKTOK STUDIO</small></span></a>
     <div class="top-actions"><button id="methodSettingsBtn" class="ghost hidden" type="button">⚙ Processing method</button><span id="connectionStatus" class="status-pill"><i></i> Checking server</span><button id="logoutBtn" class="ghost hidden">Sign out</button></div>
   </header>
 
@@ -23,8 +23,8 @@
       <div class="hero-copy">
         <div class="eyebrow"><span class="spark"></span> CREATOR WORKSPACE</div>
         <h1>Publish smarter.<br><span>Stay in control.</span></h1>
-        <p>Connect TikTok through PostZen, upload videos, and manage your publishing workflow in one workspace. Your existing JV Telegram bot remains the access authority.</p>
-        <div class="feature-row"><span>✦ Existing JV bot verification</span><span>✦ Private UID workspace</span><span>✦ PostZen publishing</span></div>
+        <p>Connect TikTok through TikTok, upload videos, and manage your publishing workflow in one workspace. Your existing JV Telegram bot remains the access authority.</p>
+        <div class="feature-row"><span>✦ Existing JV bot verification</span><span>✦ Private UID workspace</span><span>✦ TikTok publishing</span></div>
       </div>
       <div class="login-card">
         <div class="card-icon">↗</div>
@@ -68,7 +68,7 @@
                 <div class="cover-frame-wrap"><canvas id="coverCanvas" width="480" height="270" aria-label="Selected cover frame"></canvas><span id="coverTimeLabel">0.0s</span></div>
                 <input id="coverTime" class="cover-range" type="range" min="0" max="0" step="0.1" value="0" aria-label="Choose video cover frame">
                 <div id="coverThumbnails" class="cover-thumbnails"></div>
-                <small class="cover-api-note">Cover-frame selection is currently a preview only. The existing PostZen upload route does not expose a cover-frame setting.</small>
+                <small class="cover-api-note">Cover selection is shown in the preview. Custom cover publishing depends on support from the TikTok publishing API.</small>
               </div>
             </section>
             <label class="field-label" for="caption">Caption <small>Up to 2,200 characters</small></label>
@@ -96,7 +96,7 @@
               <label><input type="radio" name="privacy" value="publicToEveryone" checked><span>Everyone</span></label>
             </fieldset>
             <button id="publishBtn" class="button primary full" type="submit">Upload &amp; save draft <span>→</span></button>
-            <div id="workflowProgress" class="workflow-progress hidden" aria-live="polite"><div class="workflow-progress-top"><b id="workflowStatus">Waiting…</b><span id="workflowPercent">0%</span></div><div class="workflow-track"><div id="workflowProgressBar" class="workflow-fill"></div></div><small id="workflowStage">Only Upload sends the original video unchanged to PostZen. Other methods process it first.</small></div>
+            <div id="workflowProgress" class="workflow-progress hidden" aria-live="polite"><div class="workflow-progress-top"><b id="workflowStatus">Waiting…</b><span id="workflowPercent">0%</span></div><div class="workflow-track"><div id="workflowProgressBar" class="workflow-fill"></div></div><small id="workflowStage">Only Upload sends the original video unchanged to TikTok. Other methods process it first.</small></div>
             <div id="publishMessage" class="notice hidden"></div>
           </form>
         </section>
@@ -105,25 +105,25 @@
           <div id="historyList" class="history-list"><div class="empty-state">Loading history…</div></div>
         </section>
       </div>
-      <p class="footer-note">Existing JV bot verification · Upstash Redis · PostZen API</p>
+      <p class="footer-note">Existing JV bot verification · Upstash Redis · TikTok API</p>
     </section>
   </main>
 
   <div id="methodModal" class="method-modal hidden" role="dialog" aria-modal="true" aria-labelledby="methodModalTitle">
     <section class="method-dialog">
       <div class="method-dialog-head"><div><p class="overline">VIDEO PROCESSING</p><h2 id="methodModalTitle">Choose a method</h2></div><button id="closeMethodModal" class="ghost" type="button" aria-label="Close">✕</button></div>
-      <p class="muted">Choose a method. Only Upload sends your original video directly to PostZen without video processing.</p>
+      <p class="muted">Choose a method. Only Upload sends your original video directly to TikTok without video processing.</p>
       <div class="method-choice-list">
-        <button class="method-choice" type="button" data-method="enhanced"><span><b>Enhanced method</b><small>Secure server processing through Kuronai</small></span><i>SERVER · ENHANCED</i></button>
-        <button class="method-choice" type="button" data-method="hd"><span><b>HD method</b><small>Kuronai HQ server processing using the existing HQ upload route</small></span><i>SERVER · KURONAI HQ</i></button>
+        <button class="method-choice" type="button" data-method="enhanced"><span><b>Enhanced method</b><small>Secure server processing through JV</small></span><i>SERVER · ENHANCED</i></button>
+        <button class="method-choice" type="button" data-method="hd"><span><b>HD method</b><small>JV HQ server processing using the existing HQ upload route</small></span><i>SERVER · JV HQ</i></button>
         <div id="hdOptions" class="hd-options hidden" aria-live="polite">
-          <div class="hd-option-copy"><b>Re-encoding</b><small>On: Kuronai HQ re-encodes the video. Off: Kuronai HQ processes it without re-encoding.</small></div>
+          <div class="hd-option-copy"><b>Re-encoding</b><small>On: JV HQ re-encodes the video. Off: JV HQ processes it without re-encoding.</small></div>
           <label class="hd-toggle" for="hdReencodeToggle"><input id="hdReencodeToggle" type="checkbox" checked><span class="hd-toggle-track"></span><span id="hdReencodeState">ON</span></label>
           <button id="confirmHdMethod" class="hd-confirm" type="button">Use HD method</button>
         </div>
         <button class="method-choice" type="button" data-method="local"><span><b>Local method</b><small>Patch the MP4 in your browser; video stays on this device until publishing</small></span><i>LOCAL · PATCH</i></button>
         <button class="method-choice" type="button" data-method="ffmpeg"><span><b>FFmpeg method</b><small>Native server-side FFmpeg stream-copy remux; no WebAssembly</small></span><i>SERVER · FFmpeg</i></button>
-        <button class="method-choice" type="button" data-method="upload"><span><b>Only Upload</b><small>No video patching, conversion, or enhancement. Send the original video directly to PostZen.</small></span><i>DIRECT · POSTZEN</i></button>
+        <button class="method-choice" type="button" data-method="upload"><span><b>Only Upload</b><small>No video patching, conversion, or enhancement. Send the original video directly to TikTok.</small></span><i>DIRECT · TIKTOK</i></button>
       </div>
       <div id="methodSaveMessage" class="notice hidden"></div>
     </section>
