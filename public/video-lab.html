@@ -1118,7 +1118,7 @@ globalThis.WtmVideoEncoder = Object.freeze({ targetDimensions, reencode });
     if (EMBED_MODE) {
       bridge('JV_VIDEO_LAB_RESULT', { blob, fileName: outputName });
       fetch(`/api/process/jarvis/cleanup/${encodeURIComponent(fileId)}`, { method:'DELETE', headers: (() => { const h={}; const uid=localStorage.getItem('jv_video_lab_telegram_uid_v1'); const token=localStorage.getItem('jv_video_lab_browser_token_v1'); const session=localStorage.getItem('jv_postzen_session_v1'); if(uid)h['X-JV-Telegram-UID']=uid;if(token)h['X-JV-Browser-Token']=token;if(session)h.Authorization='Bearer '+session;return h; })() }).catch(() => {});
-      setProgress(100,true); setStatus('Server processing complete. Returning the processed MP4 to PostZen.', 'success'); return;
+      setProgress(100,true); setStatus('Server processing complete. Returning the processed MP4 to TikTok.', 'success'); return;
     }
     const objectUrl = URL.createObjectURL(new Blob([blob], {type: blob.type || 'video/mp4'}));
     const status = $('status');
@@ -1155,7 +1155,7 @@ globalThis.WtmVideoEncoder = Object.freeze({ targetDimensions, reencode });
       xhr.send(form);
     });
     bridge('JV_VIDEO_LAB_RESULT', { blob, fileName: inputFile.name.replace(/\.[^/.]+$/, '') + '_ffmpeg.mp4' });
-    setProgress(100,true); setStatus('Native FFmpeg processing complete. Returning the MP4 to PostZen.', 'success');
+    setProgress(100,true); setStatus('Native FFmpeg processing complete. Returning the MP4 to TikTok.', 'success');
   }
   let hqProcessing = false;
   let hqReencode = true;
@@ -1176,7 +1176,7 @@ globalThis.WtmVideoEncoder = Object.freeze({ targetDimensions, reencode });
         else { selectRoute('standard'); selectMethod('luna'); enhancer.checked = false; refreshMode(); }
         await loadFile(data.file);
         if (!sourceInfo) throw new Error('Video Lab could not read this video as a supported MP4.');
-        setProgress(3,true); setStatus(data.method === 'enhanced' ? 'Starting enhanced server processing…' : (hqProcessing ? `Starting Kuronai HQ processing · re-encoding ${hqReencode ? 'ON' : 'OFF'}…` : 'Starting local MP4 patching…')); 
+        setProgress(3,true); setStatus(data.method === 'enhanced' ? 'Starting enhanced server processing…' : (hqProcessing ? `Starting JV HQ processing · re-encoding ${hqReencode ? 'ON' : 'OFF'}…` : 'Starting local MP4 patching…')); 
         processBtn.click();
       } catch (error) { bridge('JV_VIDEO_LAB_ERROR', { error: error.message || 'Video processing failed.' }); }
     });
@@ -1219,7 +1219,7 @@ globalThis.WtmVideoEncoder = Object.freeze({ targetDimensions, reencode });
       const result = globalThis.WtmMp4Patcher.patch(patchInput);
       const blob = new Blob([result.output], {type:'video/mp4'});
       const outputName = original.name.replace(/\.[^/.]+$/, '') + suffix;
-      if (EMBED_MODE) { bridge('JV_VIDEO_LAB_RESULT', { blob, fileName: outputName }); setProgress(100,true); setStatus('Local MP4 patch complete. Returning the processed video to PostZen.', 'success'); }
+      if (EMBED_MODE) { bridge('JV_VIDEO_LAB_RESULT', { blob, fileName: outputName }); setProgress(100,true); setStatus('Local MP4 patch complete. Returning the processed video to TikTok.', 'success'); }
       else { const url = URL.createObjectURL(blob); const link = document.createElement('a'); link.href = url; link.download = outputName; document.body.appendChild(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url),60000); setStatus('Complete. Your processed MP4 has been downloaded.', 'success'); }
     } catch (err) {
       setStatus(err.message || 'Processing failed.', 'error'); if (EMBED_MODE) bridge('JV_VIDEO_LAB_ERROR', { error: err.message || 'Local processing failed.' });

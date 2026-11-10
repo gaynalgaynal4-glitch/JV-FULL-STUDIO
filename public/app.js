@@ -422,7 +422,17 @@ function selectServerCover(index, id = previewLoadId) {
 }
 async function inspectVideoOnServer(file, id) {
   const form = new FormData(); form.append("file", file, file.name);
-  const data = await api("/api/video/inspect", { method: "POST", body: form });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 240000);
+  let data;
+  try {
+    data = await api("/api/video/inspect", { method: "POST", body: form, signal: controller.signal });
+  } catch (error) {
+    if (error.name === "AbortError") throw new Error("The JV server took too long to inspect this video. Check that the latest server build is deployed and FFmpeg is installed.");
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
   if (id !== previewLoadId) return;
   coverDuration = Number(data.duration || 0);
   $("videoResolution").textContent = data.width && data.height ? `${data.width} × ${data.height}` : "Unavailable";
@@ -487,11 +497,13 @@ $("videoFile").addEventListener("change", async () => {
   };
   inspectVideoOnServer(file, id).catch(error => {
     if (id !== previewLoadId) return;
-    $("videoResolution").textContent = "Unavailable";
-    $("videoFps").textContent = "Unavailable";
-    $("videoDuration").textContent = "Unavailable";
-    $("videoBitrate").textContent = "Unavailable";
-    toast(`Server video inspection failed: ${error.message}`);
+    const reason = error.message || "Server inspection failed.";
+    $("videoResolution").textContent = "Failed";
+    $("videoFps").textContent = "Failed";
+    $("videoDuration").textContent = "Failed";
+    $("videoBitrate").textContent = "Failed";
+    $("coverTimeLabel").textContent = "Cover frames unavailable";
+    toast(`Video inspection failed: ${reason}`);
   });
 });
 $("coverTime").addEventListener("input", event => {
