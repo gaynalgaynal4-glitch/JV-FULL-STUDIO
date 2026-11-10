@@ -121,15 +121,16 @@ async function ensureReady(_req, res, next) {
 }
 
 function safeTelegramProfile(verification) {
-  const user = verification?.telegramProfile || verification?.profile || verification?.user || verification?.telegramUser || {};
+  const user = verification?.telegramProfile || verification?.profile || verification?.user || verification?.telegramUser || verification || {};
   const firstName = user.first_name || user.firstName || "";
   const username = user.username || "";
   const displayName = [firstName].filter(Boolean).join(" ") || username || "Telegram account";
-  const photoUrl = user.photoUrl || user.photo_url || user.avatarUrl || user.avatar_url || user.profile_photo_url || null;
+  // Never send Telegram's token-bearing file URL to the browser.
+  const hasPhoto = Boolean(user.photoUrl || user.photo_url || user.avatarUrl || user.avatar_url || user.profile_photo_url);
   return {
     displayName: String(displayName).slice(0, 80),
     username: String(username).slice(0, 64),
-    photoUrl: typeof photoUrl === "string" && /^https:\/\//i.test(photoUrl) ? photoUrl : null
+    photoUrl: hasPhoto ? "/api/telegram/profile-photo" : null
   };
 }
 
@@ -217,6 +218,34 @@ app.get("/api/me", ensureReady, requireVerified, async (req, res, next) => {
     const record = await ensureUser(req.identity.uid);
     res.json({ uid: req.identity.uid, profileReady: Boolean(record.postzenProfileId), sessionToken: req.sessionToken, telegramProfile: safeTelegramProfile(req.verification) });
   } catch (error) { next(error); }
+});
+
+app.get("/api/telegram/profile-photo", requireVerified, async (req, res) => {
+  try {
+    const rawPhotoUrl = req.verification?.photo_url || req.verification?.photoUrl ||
+      req.verification?.telegramProfile?.photo_url || req.verification?.telegramProfile?.photoUrl;
+    if (typeof rawPhotoUrl !== "string") return res.sendStatus(404);
+    const photoUrl = new URL(rawPhotoUrl);
+    if (photoUrl.protocol !== "https:" || photoUrl.hostname !== "api.telegram.org" ||
+        !/^\/file\/bot[^/]+\//.test(photoUrl.pathname)) return res.sendStatus(404);
+    const imageResponse = await fetch(photoUrl, {
+      redirect: "error",
+      signal: AbortSignal.timeout(10000),
+      headers: { Accept: "image/*" }
+    });
+    if (!imageResponse.ok) return res.sendStatus(404);
+    const contentType = imageResponse.headers.get("content-type") || "";
+    if (!contentType.startsWith("image/")) return res.sendStatus(404);
+    res.set("Content-Type", contentType);
+    res.set("Cache-Control", "private, max-age=300");
+    res.set("X-Content-Type-Options", "nosniff");
+    const bytes = Buffer.from(await imageResponse.arrayBuffer());
+    if (bytes.length > 5 * 1024 * 1024) return res.sendStatus(413);
+    res.send(bytes);
+  } catch (error) {
+    console.error("Telegram profile photo proxy:", error.message);
+    res.sendStatus(404);
+  }
 });
 
 app.post("/api/connect/tiktok", ensureReady, requireVerified, async (req, res, next) => {
