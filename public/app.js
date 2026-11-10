@@ -9,11 +9,12 @@ let identity = null;
 let sessionToken = null;
 let accounts = [];
 let selectedMethod = localStorage.getItem("jv_postzen_processing_method_v1") || "local";
-if (!Object.prototype.hasOwnProperty.call({ enhanced:1, local:1, ffmpeg:1, upload:1 }, selectedMethod)) selectedMethod = "local";
+let hdReencode = localStorage.getItem("jv_postzen_hd_reencode_v1") !== "false";
+if (!Object.prototype.hasOwnProperty.call({ enhanced:1, hd:1, local:1, ffmpeg:1, upload:1 }, selectedMethod)) selectedMethod = "local";
 let videoLabReady = false;
 let videoLabReadyPromise = null;
 let activeVideoLabJob = null;
-const METHOD_LABELS = { enhanced: "ENHANCED METHOD", local: "LOCAL METHOD", ffmpeg: "FFMPEG METHOD", upload: "ONLY UPLOAD" };
+const METHOD_LABELS = { enhanced: "ENHANCED METHOD", hd: "HD METHOD", local: "LOCAL METHOD", ffmpeg: "FFMPEG METHOD", upload: "ONLY UPLOAD" };
 
 function browserToken() {
   let token = localStorage.getItem(STORAGE_BROWSER_TOKEN);
@@ -192,6 +193,12 @@ function updateMethodUI() {
   const label = METHOD_LABELS[selectedMethod] || METHOD_LABELS.local;
   $("selectedMethodTag").textContent = label;
   document.querySelectorAll(".method-choice").forEach(button => button.classList.toggle("selected", button.dataset.method === selectedMethod));
+  const hdOptions = $("hdOptions");
+  if (hdOptions) hdOptions.classList.toggle("hidden", selectedMethod !== "hd");
+  const hdToggle = $("hdReencodeToggle");
+  if (hdToggle) hdToggle.checked = hdReencode;
+  const hdState = $("hdReencodeState");
+  if (hdState) hdState.textContent = hdReencode ? "ON" : "OFF";
 }
 function showWorkflow(message, percent = 0, stage = "", indeterminate = false) {
   $("workflowProgress").classList.remove("hidden");
@@ -218,7 +225,7 @@ function processInVideoLab(file, method) {
       const requestId = crypto.randomUUID();
       const timeout = setTimeout(() => { if (activeVideoLabJob?.requestId === requestId) { activeVideoLabJob = null; reject(new Error("Video processing timed out. Check the selected method server and try again.")); } }, 30 * 60 * 1000);
       activeVideoLabJob = { requestId, resolve: value => { clearTimeout(timeout); activeVideoLabJob = null; resolve(value); }, reject: error => { clearTimeout(timeout); activeVideoLabJob = null; reject(error); } };
-      $("videoLabFrame").contentWindow.postMessage({ type: "JV_VIDEO_LAB_PROCESS", requestId, method, file }, location.origin);
+      $("videoLabFrame").contentWindow.postMessage({ type: "JV_VIDEO_LAB_PROCESS", requestId, method, file, hdReencode }, location.origin);
     } catch (error) { reject(error); }
   });
 }
@@ -302,9 +309,20 @@ document.querySelectorAll(".method-choice").forEach(button => button.addEventLis
   selectedMethod = button.dataset.method;
   localStorage.setItem("jv_postzen_processing_method_v1", selectedMethod);
   updateMethodUI();
-  $("methodModal").classList.add("hidden");
-  toast(`${METHOD_LABELS[selectedMethod]} selected`);
+  if (selectedMethod !== "hd") {
+    $("methodModal").classList.add("hidden");
+    toast(`${METHOD_LABELS[selectedMethod]} selected`);
+  }
 }));
+$("hdReencodeToggle").addEventListener("change", event => {
+  hdReencode = Boolean(event.target.checked);
+  localStorage.setItem("jv_postzen_hd_reencode_v1", String(hdReencode));
+  updateMethodUI();
+});
+$("confirmHdMethod").addEventListener("click", () => {
+  $("methodModal").classList.add("hidden");
+  toast(`HD METHOD selected · Re-encoding ${hdReencode ? "ON" : "OFF"}`);
+});
 
 $("verifyBtn").addEventListener("click", () => verifyUID($("tgUidInput").value.trim()));
 $("tgUidInput").addEventListener("keydown", event => {
@@ -324,16 +342,30 @@ $("connectBtn").addEventListener("click", async () => {
     button.textContent = "＋ Connect TikTok";
   }
 });
-$("mode").addEventListener("change", () => {
+function refreshPostMode() {
   const mode = $("mode").value;
   $("scheduleWrap").classList.toggle("hidden", mode !== "schedule");
-  $("privacyWrap").classList.toggle("hidden", mode === "draft");
-});
+  $("publishForm").classList.toggle("is-draft", mode === "draft");
+  $("draftNote").classList.toggle("hidden", mode !== "draft");
+  $("publishBtn").firstChild.nodeValue = (mode === "draft" ? "Upload & save draft" : mode === "schedule" ? "Upload & schedule" : "Upload & post to TikTok") + " ";
+}
+$("mode").addEventListener("change", refreshPostMode);
+refreshPostMode();
 $("caption").addEventListener("input", () => $("captionCount").textContent = $("caption").value.length);
 $("videoFile").addEventListener("change", () => {
   const file = $("videoFile").files[0];
   $("fileName").textContent = file ? file.name : "Choose a video";
 });
+{
+  const dz = document.querySelector(".dropzone");
+  ["dragenter", "dragover"].forEach(t => dz.addEventListener(t, e => { e.preventDefault(); dz.classList.add("drag"); }));
+  ["dragleave", "drop"].forEach(t => dz.addEventListener(t, e => { e.preventDefault(); dz.classList.remove("drag"); }));
+  dz.addEventListener("drop", e => {
+    if (!e.dataTransfer.files.length) return;
+    $("videoFile").files = e.dataTransfer.files;
+    $("videoFile").dispatchEvent(new Event("change"));
+  });
+}
 $("publishForm").addEventListener("submit", async event => {
   event.preventDefault();
   const file = $("videoFile").files[0];
@@ -369,7 +401,12 @@ $("publishForm").addEventListener("submit", async event => {
     form.append("accountId", $("accountSelect").value);
     form.append("caption", $("caption").value);
     form.append("mode", mode);
-    form.append("privacyLevel", $("privacy").value);
+    form.append("privacyLevel", document.querySelector('input[name="privacy"]:checked')?.value || "publicToEveryone");
+    form.append("allowComment", $("allowComment").checked);
+    form.append("allowDuet", $("allowDuet").checked);
+    form.append("allowStitch", $("allowStitch").checked);
+    form.append("musicRights", $("musicRights").checked);
+    form.append("videoRights", $("videoRights").checked);
     if (mode === "schedule") form.append("scheduledFor", new Date($("scheduleTime").value).toISOString());
 
     showWorkflow("Uploading video to PostZen…", 0, selectedMethod === "upload" ? "The original file is being sent unchanged to your existing JV server, then uploaded to PostZen." : "The selected processing method has finished. PostZen media upload is now running.");
@@ -379,8 +416,7 @@ $("publishForm").addEventListener("submit", async event => {
     $("publishForm").reset();
     $("captionCount").textContent = "0";
     $("fileName").textContent = "Choose a video";
-    $("scheduleWrap").classList.add("hidden");
-    $("privacyWrap").classList.add("hidden");
+    refreshPostMode();
     loadHistory();
   } catch (error) {
     showWorkflow("Workflow failed", 0, error.message);

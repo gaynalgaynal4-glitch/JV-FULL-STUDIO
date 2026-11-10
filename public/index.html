@@ -53,18 +53,32 @@
         <section class="panel publish-panel">
           <div class="panel-heading"><div><p class="overline">NEW CONTENT</p><h2>Publish a video</h2></div><span class="tag" id="selectedMethodTag">LOCAL METHOD</span></div>
           <form id="publishForm">
-            <label class="field-label" for="accountSelect">TikTok account</label>
-            <select id="accountSelect" required><option value="">Connect an account first</option></select>
+            <label class="dropzone" for="videoFile"><span class="upload-icon">↑</span><b id="fileName">Choose a video</b><small>Drag and drop or tap · MP4 for Enhanced/Local · MP4, MOV or M4V for FFmpeg · up to <span id="maxSize">500</span> MB</small><input id="videoFile" type="file" accept="video/mp4,video/quicktime,video/x-m4v" required></label>
             <label class="field-label" for="caption">Caption <small>Up to 2,200 characters</small></label>
             <textarea id="caption" maxlength="2200" rows="4" placeholder="Write your caption…"></textarea>
             <div class="counter"><span id="captionCount">0</span>/2200</div>
-            <label class="field-label">Video file</label>
-            <label class="dropzone" for="videoFile"><span class="upload-icon">↑</span><b id="fileName">Choose a video</b><small>MP4 for Enhanced/Local · MP4, MOV or M4V for FFmpeg · up to <span id="maxSize">500</span> MB</small><input id="videoFile" type="file" accept="video/mp4,video/quicktime,video/x-m4v" required></label>
-            <label class="field-label" for="mode">Publishing mode</label>
-            <select id="mode"><option value="draft">Save as TikTok draft</option><option value="publish">Publish now</option><option value="schedule">Schedule for later</option></select>
-            <div id="scheduleWrap" class="hidden"><label class="field-label" for="scheduleTime">Schedule date and time</label><input id="scheduleTime" type="datetime-local"></div>
-            <div id="privacyWrap" class="hidden"><label class="field-label" for="privacy">Who can watch?</label><select id="privacy"><option value="publicToEveryone">Everyone</option><option value="mutualFollowFriends">Friends</option><option value="selfOnly">Only you</option></select></div>
-            <button id="publishBtn" class="button primary full" type="submit">Upload &amp; post to TikTok <span>→</span></button>
+            <label class="toggle-row" data-ps for="allowComment"><span><b>Allow comments</b><small>Let people comment on this video</small></span><input id="allowComment" type="checkbox" checked><i></i></label>
+            <label class="toggle-row" data-ps for="allowDuet"><span><b>Allow duet</b><small>Let people make a duet with this video</small></span><input id="allowDuet" type="checkbox" checked><i></i></label>
+            <div class="extra">
+              <p class="field-label">Extra</p>
+              <label class="toggle-row" data-ps for="allowStitch"><span><b>Allow stitch</b><small>Let people stitch clips from this video</small></span><input id="allowStitch" type="checkbox" checked><i></i></label>
+              <label class="field-label" for="accountSelect">TikTok account</label>
+              <select id="accountSelect" required><option value="">Connect an account first</option></select>
+              <label class="field-label" for="mode">Publishing mode</label>
+              <select id="mode"><option value="draft">Save as TikTok draft</option><option value="publish">Publish now</option><option value="schedule">Schedule for later</option></select>
+              <div id="scheduleWrap" class="hidden"><label class="field-label" for="scheduleTime">Schedule date and time</label><input id="scheduleTime" type="datetime-local"></div>
+              <p id="draftNote" class="draft-note hidden">Drafts open inside TikTok, so you choose comments, duet, stitch and visibility there.</p>
+            </div>
+            <div class="check-list">
+              <label class="check-row"><input id="musicRights" type="checkbox" required><span>Music copyright: I have the right to use all the music in this video.</span></label>
+              <label class="check-row"><input id="videoRights" type="checkbox" required><span>Video copyright: I own this video or have permission to post it.</span></label>
+            </div>
+            <fieldset id="privacyWrap" class="visibility" data-ps><legend class="field-label">Who can watch?</legend>
+              <label><input type="radio" name="privacy" value="selfOnly"><span>Only you</span></label>
+              <label><input type="radio" name="privacy" value="mutualFollowFriends"><span>Only friends</span></label>
+              <label><input type="radio" name="privacy" value="publicToEveryone" checked><span>Everyone</span></label>
+            </fieldset>
+            <button id="publishBtn" class="button primary full" type="submit">Upload &amp; save draft <span>→</span></button>
             <div id="workflowProgress" class="workflow-progress hidden" aria-live="polite"><div class="workflow-progress-top"><b id="workflowStatus">Waiting…</b><span id="workflowPercent">0%</span></div><div class="workflow-track"><div id="workflowProgressBar" class="workflow-fill"></div></div><small id="workflowStage">Only Upload sends the original video unchanged to PostZen. Other methods process it first.</small></div>
             <div id="publishMessage" class="notice hidden"></div>
           </form>
@@ -84,6 +98,12 @@
       <p class="muted">Choose a method. Only Upload sends your original video directly to PostZen without video processing.</p>
       <div class="method-choice-list">
         <button class="method-choice" type="button" data-method="enhanced"><span><b>Enhanced method</b><small>Secure server processing through Kuronai</small></span><i>SERVER · ENHANCED</i></button>
+        <button class="method-choice" type="button" data-method="hd"><span><b>HD method</b><small>Kuronai HQ server processing using the existing HQ upload route</small></span><i>SERVER · KURONAI HQ</i></button>
+        <div id="hdOptions" class="hd-options hidden" aria-live="polite">
+          <div class="hd-option-copy"><b>Re-encoding</b><small>On: Kuronai HQ re-encodes the video. Off: Kuronai HQ processes it without re-encoding.</small></div>
+          <label class="hd-toggle" for="hdReencodeToggle"><input id="hdReencodeToggle" type="checkbox" checked><span class="hd-toggle-track"></span><span id="hdReencodeState">ON</span></label>
+          <button id="confirmHdMethod" class="hd-confirm" type="button">Use HD method</button>
+        </div>
         <button class="method-choice" type="button" data-method="local"><span><b>Local method</b><small>Patch the MP4 in your browser; video stays on this device until publishing</small></span><i>LOCAL · PATCH</i></button>
         <button class="method-choice" type="button" data-method="ffmpeg"><span><b>FFmpeg method</b><small>Native server-side FFmpeg stream-copy remux; no WebAssembly</small></span><i>SERVER · FFmpeg</i></button>
         <button class="method-choice" type="button" data-method="upload"><span><b>Only Upload</b><small>No video patching, conversion, or enhancement. Send the original video directly to PostZen.</small></span><i>DIRECT · POSTZEN</i></button>

@@ -970,13 +970,13 @@ globalThis.WtmVideoEncoder = Object.freeze({ targetDimensions, reencode });
     if (statusCode === 504 || statusCode === 524) return 'The server or proxy timed out. Processing may still be running.';
     return statusCode ? `Jarvis request failed (HTTP ${statusCode}).` : 'Jarvis processing failed.';
   }
-  function jarvisUpload(inputFile, enhanced) {
+  function jarvisUpload(inputFile, enhanced, hq = false, hqReencode = true) {
     return new Promise((resolve, reject) => {
       if (enhanced && inputFile.size > JARVIS_MAX_ENCODE_BYTES) {
         reject(new Error('Jarvis server limit: encoded uploads must be 60 MB or smaller.'));
         return;
       }
-      const endpoint = enhanced ? '?enhanced=1' : '';
+      const endpoint = enhanced ? '?enhanced=1' : (hq ? `?hd=1&reencode=${hqReencode ? '1' : '0'}` : '');
       const xhr = new XMLHttpRequest();
       let consumed = 0, pending = '', completed = null, gotServerProgress = false, settled = false, lastServerEventAt = 0;
       const fail = (code, httpStatus = 0) => {
@@ -1157,6 +1157,8 @@ globalThis.WtmVideoEncoder = Object.freeze({ targetDimensions, reencode });
     bridge('JV_VIDEO_LAB_RESULT', { blob, fileName: inputFile.name.replace(/\.[^/.]+$/, '') + '_ffmpeg.mp4' });
     setProgress(100,true); setStatus('Native FFmpeg processing complete. Returning the MP4 to PostZen.', 'success');
   }
+  let hqProcessing = false;
+  let hqReencode = true;
   if (EMBED_MODE) {
     document.getElementById('app')?.removeAttribute('inert');
     window.addEventListener('message', async event => {
@@ -1167,11 +1169,14 @@ globalThis.WtmVideoEncoder = Object.freeze({ targetDimensions, reencode });
       activeBridgeRequestId = data.requestId;
       try {
         if (data.method === 'ffmpeg') { setProgress(1,true); await runNativeFFmpeg(data.file); return; }
+        hqProcessing = data.method === 'hd';
+        hqReencode = data.method === 'hd' ? data.hdReencode !== false : true;
         if (data.method === 'enhanced') { selectRoute('secure'); }
+        else if (hqProcessing) { selectRoute('standard'); selectMethod('jarvis'); enhancer.checked = false; refreshMode(); }
         else { selectRoute('standard'); selectMethod('luna'); enhancer.checked = false; refreshMode(); }
         await loadFile(data.file);
         if (!sourceInfo) throw new Error('Video Lab could not read this video as a supported MP4.');
-        setProgress(3,true); setStatus(data.method === 'enhanced' ? 'Starting enhanced server processing…' : 'Starting local MP4 patching…');
+        setProgress(3,true); setStatus(data.method === 'enhanced' ? 'Starting enhanced server processing…' : (hqProcessing ? `Starting Kuronai HQ processing · re-encoding ${hqReencode ? 'ON' : 'OFF'}…` : 'Starting local MP4 patching…')); 
         processBtn.click();
       } catch (error) { bridge('JV_VIDEO_LAB_ERROR', { error: error.message || 'Video processing failed.' }); }
     });
@@ -1186,12 +1191,12 @@ globalThis.WtmVideoEncoder = Object.freeze({ targetDimensions, reencode });
       try {
         setProgress(0,true);
         setStatus(routeMode === 'secure' ? 'Sending video to Secure enhanced server processing…' : (useServerEncoder ? 'Sending video to Jarvis server encoder…' : 'Sending video to Jarvis for direct MP4 patching…'));
-        const uploaded = await jarvisUpload(original, useServerEncoder);
+        const uploaded = await jarvisUpload(original, useServerEncoder, hqProcessing, hqReencode);
         await jarvisDownload(uploaded.file_id, original.name, useServerEncoder);
       } catch (err) {
         setStatus(err.message || 'Jarvis processing failed.', 'error'); if (EMBED_MODE) bridge('JV_VIDEO_LAB_ERROR', { error: err.message || 'Enhanced processing failed.' });
       } finally {
-        busy = false; processBtn.disabled = false;
+        busy = false; hqProcessing = false; hqReencode = true; processBtn.disabled = false;
         processBtn.textContent = routeMode === 'secure' ? 'Secure enhance, patch & download' : (enhancer.checked ? (processingMethod === 'jarvis' ? 'Server enhance, patch & download' : 'Enhance, patch & download') : 'Patch & download');
         setProgress(0,false);
       }
