@@ -53,7 +53,24 @@
         <section class="panel publish-panel">
           <div class="panel-heading"><div><p class="overline">NEW CONTENT</p><h2>Publish a video</h2></div><span class="tag" id="selectedMethodTag">LOCAL METHOD</span></div>
           <form id="publishForm">
-            <label class="dropzone" for="videoFile"><span class="upload-icon">↑</span><b id="fileName">Choose a video</b><small>Drag and drop or tap · MP4 for Enhanced/Local · MP4, MOV or M4V for FFmpeg · up to <span id="maxSize">500</span> MB</small><input id="videoFile" type="file" accept="video/mp4,video/quicktime,video/x-m4v" required></label>
+            <label id="dropzone" class="dropzone" for="videoFile"><span class="upload-icon">↑</span><b id="fileName">Choose a video</b><small>Drag and drop or tap · MP4 for Enhanced/Local · MP4, MOV or M4V for FFmpeg · up to <span id="maxSize">500</span> MB</small><input id="videoFile" type="file" accept="video/mp4,video/quicktime,video/x-m4v" required></label>
+            <section id="videoPreviewPanel" class="video-preview-panel hidden" aria-label="Selected video preview">
+              <div class="video-preview-head"><div><b id="previewFileName">Selected video</b><small id="previewFileSize">—</small></div><label class="change-video" for="videoFile">Change video</label></div>
+              <video id="selectedVideoPreview" class="selected-video-preview" controls playsinline preload="metadata"></video>
+              <div class="video-metadata">
+                <div><small>Resolution</small><b id="videoResolution">—</b></div>
+                <div><small>Frame rate</small><b id="videoFps">Checking…</b></div>
+                <div><small>Duration</small><b id="videoDuration">—</b></div>
+                <div><small>Bitrate</small><b id="videoBitrate">—</b></div>
+              </div>
+              <div class="cover-selector">
+                <div class="cover-heading"><b>Video cover</b><small>Select a frame for your cover</small></div>
+                <div class="cover-frame-wrap"><canvas id="coverCanvas" width="480" height="270" aria-label="Selected cover frame"></canvas><span id="coverTimeLabel">0.0s</span></div>
+                <input id="coverTime" class="cover-range" type="range" min="0" max="0" step="0.1" value="0" aria-label="Choose video cover frame">
+                <div id="coverThumbnails" class="cover-thumbnails"></div>
+                <small class="cover-api-note">Cover-frame selection is currently a preview only. The existing PostZen upload route does not expose a cover-frame setting.</small>
+              </div>
+            </section>
             <label class="field-label" for="caption">Caption <small>Up to 2,200 characters</small></label>
             <textarea id="caption" maxlength="2200" rows="4" placeholder="Write your caption…"></textarea>
             <div class="counter"><span id="captionCount">0</span>/2200</div>

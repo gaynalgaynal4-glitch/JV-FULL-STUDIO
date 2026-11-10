@@ -352,9 +352,164 @@ function refreshPostMode() {
 $("mode").addEventListener("change", refreshPostMode);
 refreshPostMode();
 $("caption").addEventListener("input", () => $("captionCount").textContent = $("caption").value.length);
-$("videoFile").addEventListener("change", () => {
+
+let previewObjectUrl = null;
+let previewLoadId = 0;
+let coverDuration = 0;
+let coverThumbTimes = [];
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 0) return "—";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = bytes, unit = 0;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit++; }
+  return `${value.toFixed(unit ? 2 : 0)} ${units[unit]}`;
+}
+function formatDuration(seconds) {
+  if (!Number.isFinite(seconds)) return "—";
+  const whole = Math.floor(seconds);
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
+}
+function drawCoverFrame(video, canvas) {
+  if (!video.videoWidth || !video.videoHeight) return false;
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width, h = canvas.height;
+  ctx.fillStyle = "#05080e"; ctx.fillRect(0, 0, w, h);
+  const scale = Math.min(w / video.videoWidth, h / video.videoHeight);
+  const dw = video.videoWidth * scale, dh = video.videoHeight * scale;
+  ctx.drawImage(video, (w - dw) / 2, (h - dh) / 2, dw, dh);
+  return true;
+}
+function seekVideo(video, time) {
+  return new Promise(resolve => {
+    const target = Math.max(0, Math.min(time, Math.max(0, video.duration - 0.05)));
+    if (Math.abs(video.currentTime - target) < 0.04 && video.readyState >= 2) return resolve();
+    const done = () => { video.removeEventListener("seeked", done); resolve(); };
+    video.addEventListener("seeked", done, { once: true });
+    video.currentTime = target;
+    setTimeout(done, 1800);
+  });
+}
+async function setCoverTime(time, id = previewLoadId) {
+  const video = $("selectedVideoPreview");
+  if (!video.src || id !== previewLoadId) return;
+  const safeTime = Math.max(0, Math.min(Number(time) || 0, Math.max(0, coverDuration - 0.05)));
+  $("coverTime").value = String(safeTime);
+  $("coverTimeLabel").textContent = `${safeTime.toFixed(1)}s`;
+  await seekVideo(video, safeTime);
+  if (id === previewLoadId) drawCoverFrame(video, $("coverCanvas"));
+}
+async function estimateFrameRate(video, id) {
+  if (!("requestVideoFrameCallback" in video)) return "Unavailable";
+  const originalTime = video.currentTime;
+  let count = 0, first = null, last = null, callbacks = 0;
+  try {
+    video.muted = true;
+    await video.play();
+    await new Promise(resolve => {
+      const started = performance.now();
+      const sample = (_now, metadata) => {
+        if (id !== previewLoadId) return resolve();
+        callbacks++;
+        if (first === null) first = metadata.mediaTime;
+        last = metadata.mediaTime;
+        count++;
+        if (performance.now() - started >= 1100 || callbacks > 90) return resolve();
+        video.requestVideoFrameCallback(sample);
+      };
+      video.requestVideoFrameCallback(sample);
+      setTimeout(resolve, 1500);
+    });
+    video.pause();
+  } catch {}
+  if (id !== previewLoadId) return "—";
+  const fps = last !== null && last > first ? (count - 1) / (last - first) : 0;
+  try { video.currentTime = originalTime; } catch {}
+  return fps > 1 && fps < 241 ? `≈ ${Math.round(fps)} FPS` : "Unavailable";
+}
+async function buildCoverThumbnails(id) {
+  const video = $("selectedVideoPreview");
+  const holder = $("coverThumbnails");
+  holder.replaceChildren();
+  coverThumbTimes = [];
+  const count = 5;
+  for (let i = 0; i < count; i++) {
+    const time = coverDuration > 0 ? coverDuration * (i + 1) / (count + 1) : 0;
+    coverThumbTimes.push(time);
+    const button = document.createElement("button");
+    button.type = "button"; button.className = "cover-thumb";
+    button.setAttribute("aria-label", `Select cover at ${time.toFixed(1)} seconds`);
+    const canvas = document.createElement("canvas"); canvas.width = 160; canvas.height = 90;
+    button.append(canvas);
+    button.addEventListener("click", () => {
+      holder.querySelectorAll(".cover-thumb").forEach(el => el.classList.remove("active"));
+      button.classList.add("active");
+      setCoverTime(time, id);
+    });
+    holder.append(button);
+    await seekVideo(video, time);
+    if (id !== previewLoadId) return;
+    drawCoverFrame(video, canvas);
+  }
+  const first = holder.querySelector(".cover-thumb");
+  if (first) first.classList.add("active");
+  await setCoverTime(0, id);
+}
+function clearVideoPreview() {
+  previewLoadId++;
+  if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl);
+  previewObjectUrl = null;
+  $("videoPreviewPanel").classList.add("hidden");
+  $("dropzone")?.classList.remove("hidden");
+  $("fileName").textContent = "Choose a video";
+  $("coverThumbnails").replaceChildren();
+  $("selectedVideoPreview").removeAttribute("src");
+  $("selectedVideoPreview").load();
+}
+$("videoFile").addEventListener("change", async () => {
   const file = $("videoFile").files[0];
-  $("fileName").textContent = file ? file.name : "Choose a video";
+  if (!file) { clearVideoPreview(); return; }
+  if (!file.type.startsWith("video/")) {
+    toast("Please select a video file.");
+    $("videoFile").value = "";
+    clearVideoPreview();
+    return;
+  }
+  const id = ++previewLoadId;
+  if (previewObjectUrl) URL.revokeObjectURL(previewObjectUrl);
+  previewObjectUrl = URL.createObjectURL(file);
+  $("dropzone")?.classList.add("hidden");
+  $("videoPreviewPanel").classList.remove("hidden");
+  $("fileName").textContent = file.name;
+  $("previewFileName").textContent = file.name;
+  $("previewFileSize").textContent = formatBytes(file.size);
+  $("videoResolution").textContent = "Reading…";
+  $("videoFps").textContent = "Checking…";
+  $("videoDuration").textContent = "Reading…";
+  $("videoBitrate").textContent = "Calculating…";
+  const video = $("selectedVideoPreview");
+  video.src = previewObjectUrl;
+  video.load();
+  video.onloadedmetadata = async () => {
+    if (id !== previewLoadId) return;
+    coverDuration = Number.isFinite(video.duration) ? video.duration : 0;
+    $("videoResolution").textContent = `${video.videoWidth} × ${video.videoHeight}`;
+    $("videoDuration").textContent = formatDuration(video.duration);
+    const bitrate = coverDuration > 0 ? (file.size * 8 / coverDuration) / 1000 : 0;
+    $("videoBitrate").textContent = bitrate > 0 ? `≈ ${Math.round(bitrate)} kbps` : "Unavailable";
+    $("coverTime").max = String(Math.max(0, coverDuration));
+    $("coverTime").value = "0";
+    await buildCoverThumbnails(id);
+    const fps = await estimateFrameRate(video, id);
+    if (id === previewLoadId) $("videoFps").textContent = fps;
+  };
+  video.onerror = () => {
+    if (id === previewLoadId) toast("This browser could not read the selected video preview.");
+  };
+});
+$("coverTime").addEventListener("input", event => {
+  $("coverThumbnails").querySelectorAll(".cover-thumb").forEach(el => el.classList.remove("active"));
+  setCoverTime(event.target.value);
 });
 {
   const dz = document.querySelector(".dropzone");
@@ -415,7 +570,8 @@ $("publishForm").addEventListener("submit", async event => {
     notice($("publishMessage"), result.message || "Processed video submitted to PostZen.");
     $("publishForm").reset();
     $("captionCount").textContent = "0";
-    $("fileName").textContent = "Choose a video";
+    clearVideoPreview();
+    $("videoFile").value = "";
     refreshPostMode();
     loadHistory();
   } catch (error) {
