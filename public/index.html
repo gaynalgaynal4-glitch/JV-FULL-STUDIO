@@ -53,7 +53,7 @@
         <section class="panel publish-panel">
           <div class="panel-heading"><div><p class="overline">NEW CONTENT</p><h2>Publish a video</h2></div><span class="tag" id="selectedMethodTag">LOCAL METHOD</span></div>
           <form id="publishForm">
-            <label id="dropzone" class="dropzone" for="videoFile"><span class="upload-icon">↑</span><b id="fileName">Choose a video</b><small>Drag and drop or tap · MP4 for Enhanced/Local · MP4, MOV or M4V for FFmpeg · up to <span id="maxSize">500</span> MB</small><input id="videoFile" type="file" accept="video/mp4,video/quicktime,video/x-m4v" required></label>
+            <label id="dropzone" class="dropzone" for="videoFile"><span class="upload-icon">↑</span><b id="fileName">Choose a video</b><small> select a video under<span id="maxSize">500</span> MB</small><input id="videoFile" type="file" accept="video/mp4,video/quicktime,video/x-m4v" required></label>
             <section id="videoPreviewPanel" class="video-preview-panel hidden" aria-label="Selected video preview">
               <div class="video-preview-head"><div><b id="previewFileName">Selected video</b><small id="previewFileSize">—</small></div><label class="change-video" for="videoFile">Change video</label></div>
               <video id="selectedVideoPreview" class="selected-video-preview" controls playsinline preload="metadata"></video>
@@ -105,7 +105,7 @@
           <div id="historyList" class="history-list"><div class="empty-state">Loading history…</div></div>
         </section>
       </div>
-      <p class="footer-note">Existing JV bot verification · Upstash Redis · TikTok API</p>
+      <p class="footer-note"></p>
     </section>
   </main>
 
@@ -129,6 +129,10 @@
     </section>
   </div>
   <iframe id="videoLabFrame" title="JV Video Lab processing engine" src="/video-lab.html?embed=1" class="video-lab-frame" aria-hidden="true"></iframe>
+  <div id="toast" class="toast hidden"></div>
+</body>
+</html>
+embed=1" class="video-lab-frame" aria-hidden="true"></iframe>
   <div id="toast" class="toast hidden"></div>
 </body>
 </html>
