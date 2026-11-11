@@ -221,30 +221,90 @@ app.get("/api/me", ensureReady, requireVerified, async (req, res, next) => {
 });
 
 app.get("/api/telegram/profile-photo", requireVerified, async (req, res) => {
+  // requireVerified supplies the UID and browser token only after the existing
+  // JV bot has confirmed that this browser session is authorized.
+  const identity = req.identity;
+  if (!identity ||
+      !/^[0-9]{5,20}$/.test(String(identity.uid)) ||
+      !/^[a-f0-9]{48}$/.test(String(identity.browserToken))) {
+    return res.sendStatus(401);
+  }
+
+  const maxPhotoBytes = 5 * 1024 * 1024;
+  const photoEndpoint = `${VERIFY_API}/profile-photo/${encodeURIComponent(identity.uid)}/${encodeURIComponent(identity.browserToken)}`;
+
   try {
-    const rawPhotoUrl = req.verification?.photo_url || req.verification?.photoUrl ||
-      req.verification?.telegramProfile?.photo_url || req.verification?.telegramProfile?.photoUrl;
-    if (typeof rawPhotoUrl !== "string") return res.sendStatus(404);
-    const photoUrl = new URL(rawPhotoUrl);
-    if (photoUrl.protocol !== "https:" || photoUrl.hostname !== "api.telegram.org" ||
-        !/^\/file\/bot[^/]+\//.test(photoUrl.pathname)) return res.sendStatus(404);
-    const imageResponse = await fetch(photoUrl, {
+    const imageResponse = await fetch(photoEndpoint, {
+      method: "GET",
       redirect: "error",
+      cache: "no-store",
       signal: AbortSignal.timeout(10000),
-      headers: { Accept: "image/*" }
+      headers: { Accept: "image/jpeg" }
     });
-    if (!imageResponse.ok) return res.sendStatus(404);
-    const contentType = imageResponse.headers.get("content-type") || "";
-    if (!contentType.startsWith("image/")) return res.sendStatus(404);
-    res.set("Content-Type", contentType);
+
+    // The JV bot returns 404 when the Telegram user has no profile photo.
+    // Do not expose upstream response bodies or internal service details.
+    if (imageResponse.status === 404) return res.sendStatus(404);
+    if (imageResponse.status === 401 || imageResponse.status === 403) return res.sendStatus(403);
+    if (!imageResponse.ok) {
+      console.warn("JV profile-photo service returned HTTP", imageResponse.status);
+      return res.sendStatus(502);
+    }
+
+    const contentType = (imageResponse.headers.get("content-type") || "")
+      .split(";")[0].trim().toLowerCase();
+    if (contentType !== "image/jpeg") {
+      await imageResponse.body?.cancel().catch(() => {});
+      return res.sendStatus(502);
+    }
+
+    const declaredLength = Number(imageResponse.headers.get("content-length"));
+    if (Number.isFinite(declaredLength) && declaredLength > maxPhotoBytes) {
+      await imageResponse.body?.cancel().catch(() => {});
+      return res.sendStatus(413);
+    }
+
+    if (!imageResponse.body) return res.sendStatus(502);
+
+    // Read incrementally so an upstream response cannot force an unbounded
+    // allocation. The JV bot currently serves Telegram profile photos as JPEG.
+    const reader = imageResponse.body.getReader();
+    const chunks = [];
+    let totalBytes = 0;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        totalBytes += value.byteLength;
+        if (totalBytes > maxPhotoBytes) {
+          await reader.cancel().catch(() => {});
+          return res.sendStatus(413);
+        }
+        chunks.push(Buffer.from(value));
+      }
+    } finally {
+      reader.releaseLock();
+    }
+
+    const bytes = Buffer.concat(chunks, totalBytes);
+    // Check the JPEG signature as well as the upstream MIME type.
+    if (bytes.length < 3 || bytes[0] !== 0xff || bytes[1] !== 0xd8 || bytes[2] !== 0xff) {
+      return res.sendStatus(502);
+    }
+
+    res.set("Content-Type", "image/jpeg");
+    res.set("Content-Length", String(bytes.length));
     res.set("Cache-Control", "private, max-age=300");
     res.set("X-Content-Type-Options", "nosniff");
-    const bytes = Buffer.from(await imageResponse.arrayBuffer());
-    if (bytes.length > 5 * 1024 * 1024) return res.sendStatus(413);
-    res.send(bytes);
+    return res.send(bytes);
   } catch (error) {
-    console.error("Telegram profile photo proxy:", error.message);
-    res.sendStatus(404);
+    console.error("JV Telegram profile photo proxy:", error.name === "TimeoutError"
+      ? "upstream request timed out"
+      : error.message);
+    if (error.name === "TimeoutError" || error.name === "AbortError") {
+      return res.sendStatus(504);
+    }
+    return res.sendStatus(502);
   }
 });
 
