@@ -21,7 +21,7 @@ const LIME_TOTAL_ACCOUNT_CAPACITY = Math.max(0, Number.parseInt(process.env.LIME
 const SESSION_SECRET = process.env.SESSION_SECRET || "";
 const MAX_MB = Math.max(1, Math.min(Number(process.env.MAX_VIDEO_SIZE_MB || 500), 500));
 const MAX_BYTES = MAX_MB * 1024 * 1024;
-const LIME_API = "https://api.limesocial.io";
+const LIME_API = (process.env.LIME_API_URL || "https://api.limesocial.io").replace(/\/$/, "");
 const KURONAI_API = (process.env.KURONAI_API_BASE || "https://api.kuronaiapp.com").replace(/\/$/, "");
 const KURONAI_TG_ID = process.env.KURONAI_TG_ID || "";
 const KURONAI_MAX_BYTES = 60 * 1024 * 1024;
@@ -195,14 +195,25 @@ async function limeRequest(keyRecord, pathname, options = {}) {
       signal: fetchOptions.signal || AbortSignal.timeout(30000)
     });
   } catch (cause) {
-    await redis.set(limeHealthKey(keyRecord), { status: 503, blockedUntil: Date.now() + 30000 }, { ex: 30 }).catch(() => {});
-    const error = new Error("Lime Social could not be reached. This API key is temporarily paused.");
+    // Distinguish DNS/TLS/timeout/network failures from an HTTP response. Never log
+    // request headers, API keys, or the full request options.
+    const code = String(cause?.cause?.code || cause?.code || cause?.name || "unknown");
+    console.error(`Lime Social network failure on ${pathname}: ${code}`);
+    await redis.set(limeHealthKey(keyRecord), { status: 503, blockedUntil: Date.now() + 10000 }, { ex: 10 }).catch(() => {});
+    const error = new Error(`Could not establish a connection to Lime Social (${code}).`);
     error.status = 503;
+    error.networkFailure = true;
     throw error;
   }
   const raw = await response.text();
   let data;
-  try { data = raw ? JSON.parse(raw) : {}; } catch { data = { message: "Provider returned an unreadable response." }; }
+  try { data = raw ? JSON.parse(raw) : {}; } catch { data = { message: "Provider returned a non-JSON response." }; }
+  if (!response.ok) {
+    // Provider diagnostics are useful in Render logs, but redact the configured key
+    // and cap the response body to avoid leaking credentials or large HTML pages.
+    const safeBody = String(raw || "").replaceAll(keyRecord.key, "[REDACTED]").replace(/(authorization\s*[:=]\s*)[^,\s]+/ig, "$1[REDACTED]").slice(0, 700);
+    console.error(`Lime Social HTTP ${response.status} ${response.statusText || ""} on ${pathname}; content-type=${response.headers.get("content-type") || "unknown"}; response=${safeBody || "<empty>"}`);
+  }
   if (response.status === 429) {
     await redis.set(limeHealthKey(keyRecord), { status: 429, blockedUntil: Date.now() + 60000 }, { ex: 60 });
   } else if (response.status === 401) {
@@ -258,7 +269,7 @@ async function chooseLimeKey() {
       const tiktokCount = me.accounts.filter(a => a.platform === "tiktok").length;
       candidates.push({ key, tiktokCount });
     } catch (error) {
-      console.warn(`Lime Social key slot ${key.id} unavailable (HTTP ${error.status || 0}).`);
+      console.warn(`Lime Social key slot ${key.id} unavailable: ${error.networkFailure ? "network/TLS/timeout failure" : `HTTP ${error.status || 0}`}.`);
     }
   }
   if (!candidates.length) {
