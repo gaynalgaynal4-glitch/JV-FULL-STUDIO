@@ -8,7 +8,7 @@ let config = null;
 let identity = null;
 let sessionToken = null;
 let accounts = [];
-let selectedMethod = localStorage.getItem("jv_postzen_processing_method_v1") || "local";
+let selectedMethod = localStorage.getItem("jv_postzen_processing_method_v1") || "upload";
 let hdReencode = localStorage.getItem("jv_postzen_hd_reencode_v1") !== "false";
 if (!Object.prototype.hasOwnProperty.call({ enhanced:1, hd:1, local:1, ffmpeg:1, upload:1 }, selectedMethod)) selectedMethod = "local";
 let videoLabReady = false;
@@ -98,6 +98,7 @@ function showDashboard() {
   updateMethodUI();
   $("userId").textContent = `Telegram UID · ${identity.uid}`;
   loadAccounts();
+  loadCapacity();
   loadHistory();
 }
 function showLogin() {
@@ -160,6 +161,22 @@ async function refreshAuth() {
   }
 }
 
+async function loadCapacity() {
+  try {
+    const data = await api("/api/connections/capacity");
+    $("capacityTotal").textContent = data.totalCapacity;
+    $("capacityConnected").textContent = data.connected;
+    $("capacityAvailable").textContent = data.availableSlots;
+    $("capacityStatus").textContent = data.totalCapacity <= 0 ? "Capacity not configured" : !data.providerKeysAvailable ? "API keys not configured" : data.acceptingConnections ? "Accepting connections" : "Full";
+    $("connectBtn").disabled = !data.acceptingConnections;
+    $("connectBtn").title = data.acceptingConnections ? "Connect a TikTok account" : "No available TikTok connection slots";
+    $("connectBtn").textContent = data.acceptingConnections ? "＋ Connect TikTok" : "No available slots";
+  } catch (error) {
+    $("capacityStatus").textContent = "Unavailable";
+    $("connectBtn").disabled = true;
+  }
+}
+
 async function loadAccounts() {
   try {
     const data = await api("/api/accounts");
@@ -195,6 +212,7 @@ async function loadAccounts() {
           await api(`/api/accounts/${encodeURIComponent(id)}`, { method: "DELETE" });
           toast("TikTok account disconnected.");
           await loadAccounts();
+          await loadCapacity();
         } catch (error) {
           toast(error.message);
           button.disabled = false;
@@ -229,10 +247,30 @@ async function loadHistory() {
       const small = document.createElement("small");
       small.textContent = new Date(post.createdAt).toLocaleString();
       left.append(title, small);
+      const actions = document.createElement("div");
+      actions.className = "history-actions";
       const status = document.createElement("span");
       status.className = "history-status";
       status.textContent = String(post.status || "submitted").replaceAll("_", " ");
-      item.append(left, status);
+      actions.appendChild(status);
+      if (post.provider === "lime" && (post.requestId || post.id)) {
+        const check = document.createElement("button");
+        check.type = "button";
+        check.className = "ghost history-refresh";
+        check.textContent = "Check status";
+        check.addEventListener("click", async () => {
+          check.disabled = true;
+          check.textContent = "Checking…";
+          try {
+            const fresh = await api(`/api/posts/${encodeURIComponent(post.requestId || post.id)}/status`);
+            status.textContent = String(fresh.post.status || "unknown").replaceAll("_", " ");
+            if (fresh.post.status === "failed") toast("Lime Social reports that this post failed.");
+          } catch (error) { toast(error.message); }
+          finally { check.disabled = false; check.textContent = "Check status"; }
+        });
+        actions.appendChild(check);
+      }
+      item.append(left, actions);
       list.appendChild(item);
     }
   } catch (error) {
@@ -399,15 +437,16 @@ $("tgUidInput").addEventListener("keydown", event => {
 $("connectBtn").addEventListener("click", async () => {
   const button = $("connectBtn");
   button.disabled = true;
-  button.textContent = "Opening TikTok…";
+  button.textContent = "Opening Lime Social…";
   try {
     const result = await api("/api/connect/tiktok", { method: "POST" });
-    location.href = result.authUrl;
+    location.href = result.connectUrl;
   } catch (error) {
     toast(error.message);
   } finally {
     button.disabled = false;
     button.textContent = "＋ Connect TikTok";
+    await loadCapacity();
   }
 });
 function refreshPostMode() {
@@ -415,7 +454,7 @@ function refreshPostMode() {
   $("scheduleWrap").classList.toggle("hidden", mode !== "schedule");
   $("publishForm").classList.toggle("is-draft", mode === "draft");
   $("draftNote").classList.toggle("hidden", mode !== "draft");
-  $("publishBtn").firstChild.nodeValue = (mode === "draft" ? "Upload & save draft" : mode === "schedule" ? "Upload & schedule" : "Upload & post to TikTok") + " ";
+  $("publishBtn").firstChild.nodeValue = (mode === "draft" ? "Upload for manual posting" : mode === "schedule" ? "Upload & schedule" : "Upload & post to TikTok") + " ";
 }
 $("mode").addEventListener("change", refreshPostMode);
 refreshPostMode();
@@ -618,7 +657,7 @@ $("publishForm").addEventListener("submit", async event => {
     let videoToUpload = file;
     let uploadFileName = file.name;
     if (selectedMethod === "upload") {
-      showWorkflow("Only Upload selected", 5, "No patching, conversion, enhancement, or video processing. Sending the original video to your existing JV server.");
+      showWorkflow("Only Upload selected", 5, "No patching, conversion, enhancement, or video processing. Sending the original file to Lime Social without JV processing.");
     } else {
       showWorkflow(`Starting ${METHOD_LABELS[selectedMethod]}…`, 2, "Preparing the original video.");
       const processed = await processInVideoLab(file, selectedMethod);
@@ -641,10 +680,10 @@ $("publishForm").addEventListener("submit", async event => {
     form.append("videoRights", $("videoRights").checked);
     if (mode === "schedule") form.append("scheduledFor", new Date($("scheduleTime").value).toISOString());
 
-    showWorkflow("Uploading video to TikTok…", 0, selectedMethod === "upload" ? "The original file is being sent unchanged to your existing JV server, then uploaded to TikTok." : "The selected processing method has finished. TikTok media upload is now running.");
+    showWorkflow("Uploading video to TikTok…", 0, selectedMethod === "upload" ? "The original file is being sent to Lime Social without JV processing. Lime Social may process it after receipt." : "The selected processing method has finished. TikTok media upload is now running.");
     const result = await uploadPostWithProgress(form, pct => showWorkflow(`Uploading to JV TikTok server · ${pct}%`, Math.min(10, pct * 0.10), "Sending the processed MP4 from your browser to JV TikTok."), event => showWorkflow(event.message || "TikTok is processing the upload…", event.stage === "server_receive" ? 10 : 10 + (event.percent ?? 0) * 0.90, event.stage || "TikTok media upload and publishing."));
-    showWorkflow("Post submitted successfully", 100, result.message || "TikTok accepted the TikTok post request.");
-    notice($("publishMessage"), result.message || "Processed video submitted to TikTok.");
+    showWorkflow("Post submitted successfully", 100, result.message || "Lime Social accepted the TikTok post request.");
+    notice($("publishMessage"), result.message || "Video submitted to Lime Social.");
     $("publishForm").reset();
     $("captionCount").textContent = "0";
     clearVideoPreview();
@@ -669,6 +708,14 @@ $("logoutBtn").addEventListener("click", () => {
   showLogin();
   toast("Signed out on this website. Use the JV bot's reset option if you need to move browsers.");
 });
+
+(function showConnectResult() {
+  const result = new URLSearchParams(location.search).get("connect");
+  if (!result) return;
+  const messages = { success: "TikTok account connected.", failed: "TikTok connection was not completed.", expired: "The connection request expired. Try again.", invalid: "Invalid connection response.", "key-unavailable": "The Lime Social key used for this connection is no longer configured.", "not-confirmed": "Lime Social did not confirm the connected TikTok account." };
+  toast(messages[result] || "TikTok connection could not be completed.");
+  history.replaceState({}, "", location.pathname);
+})();
 
 (async function init() {
   try {

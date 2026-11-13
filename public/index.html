@@ -23,7 +23,7 @@
       <div class="hero-copy">
         <div class="eyebrow"><span class="spark"></span> CREATOR WORKSPACE</div>
         <h1>Publish smarter.<br><span>Stay in control.</span></h1>
-        <p>Connect TikTok through TikTok, upload videos, and manage your publishing workflow in one workspace. Your existing JV Telegram bot remains the access authority.</p>
+        <p>Connect TikTok through Lime Social, upload videos, and manage your publishing workflow in one workspace. Your existing JV Telegram bot remains the access authority.</p>
         <div class="feature-row"><span>✦ Existing JV bot verification</span><span>✦ Private UID workspace</span><span>✦ TikTok publishing</span></div>
       </div>
       <div class="login-card">
@@ -48,6 +48,12 @@
       <div class="dashboard-grid">
         <section class="panel accounts-panel">
           <div class="panel-heading"><div><p class="overline">SOCIAL ACCOUNTS</p><h2>Connected TikTok accounts</h2></div><button id="connectBtn" class="button secondary">＋ Connect TikTok</button></div>
+          <div class="connection-capacity" aria-live="polite">
+            <div><small>Total capacity</small><b id="capacityTotal">—</b></div>
+            <div><small>Connected</small><b id="capacityConnected">—</b></div>
+            <div><small>Available</small><b id="capacityAvailable">—</b></div>
+            <div class="capacity-state"><small>Connection status</small><b id="capacityStatus">Checking…</b></div>
+          </div>
           <div id="accountsList" class="accounts-list"><div class="empty-state">Loading your accounts…</div></div>
         </section>
         <section class="panel publish-panel">
@@ -82,9 +88,9 @@
               <label class="field-label" for="accountSelect">TikTok account</label>
               <select id="accountSelect" required><option value="">Connect an account first</option></select>
               <label class="field-label" for="mode">Publishing mode</label>
-              <select id="mode"><option value="draft">Save as TikTok draft</option><option value="publish">Publish now</option><option value="schedule">Schedule for later</option></select>
+              <select id="mode"><option value="draft">Upload for manual posting</option><option value="publish">Publish now</option><option value="schedule">Schedule for later</option></select>
               <div id="scheduleWrap" class="hidden"><label class="field-label" for="scheduleTime">Schedule date and time</label><input id="scheduleTime" type="datetime-local"></div>
-              <p id="draftNote" class="draft-note hidden">Drafts open inside TikTok, so you choose comments, duet, stitch and visibility there.</p>
+              <p id="draftNote" class="draft-note hidden">Lime Social MEDIA_UPLOAD sends the video for manual completion in TikTok; it is not a saved TikTok draft.</p>
             </div>
             <div class="check-list">
               <label class="check-row"><input id="musicRights" type="checkbox" required><span>Music copyright: I have the right to use all the music in this video.</span></label>
@@ -95,7 +101,7 @@
               <label><input type="radio" name="privacy" value="mutualFollowFriends"><span>Only friends</span></label>
               <label><input type="radio" name="privacy" value="publicToEveryone" checked><span>Everyone</span></label>
             </fieldset>
-            <button id="publishBtn" class="button primary full" type="submit">Upload &amp; save draft <span>→</span></button>
+            <button id="publishBtn" class="button primary full" type="submit">Upload for manual posting <span>→</span></button>
             <div id="workflowProgress" class="workflow-progress hidden" aria-live="polite"><div class="workflow-progress-top"><b id="workflowStatus">Waiting…</b><span id="workflowPercent">0%</span></div><div class="workflow-track"><div id="workflowProgressBar" class="workflow-fill"></div></div><small id="workflowStage">Only Upload sends the original video unchanged to TikTok. Other methods process it first.</small></div>
             <div id="publishMessage" class="notice hidden"></div>
           </form>
@@ -123,7 +129,7 @@
         </div>
         <button class="method-choice" type="button" data-method="local"><span><b>Local method</b><small>Patch the MP4 in your browser; video stays on this device until publishing</small></span><i>LOCAL · PATCH</i></button>
         <button class="method-choice" type="button" data-method="ffmpeg"><span><b>FFmpeg method</b><small>Native server-side FFmpeg stream-copy remux; no WebAssembly</small></span><i>SERVER · FFmpeg</i></button>
-        <button class="method-choice" type="button" data-method="upload"><span><b>Only Upload</b><small>No video patching, conversion, or enhancement. Send the original video directly to TikTok.</small></span><i>DIRECT · TIKTOK</i></button>
+        <button class="method-choice" type="button" data-method="upload"><span><b>Only Upload</b><small>No JV patching, conversion, or enhancement. Send the original file to Lime Social as uploaded.</small></span><i>DIRECT · LIME SOCIAL</i></button>
       </div>
       <div id="methodSaveMessage" class="notice hidden"></div>
     </section>
