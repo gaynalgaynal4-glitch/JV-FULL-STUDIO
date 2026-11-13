@@ -17,11 +17,11 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const APP_URL = (process.env.APP_URL || "").replace(/\/$/, "");
 const VERIFY_API = (process.env.JV_VERIFY_API_BASE || "https://google-colabe-bot.onrender.com").replace(/\/$/, "");
-const POSTZEN_KEY = process.env.POSTZEN_API_KEY || "";
+const LIME_TOTAL_ACCOUNT_CAPACITY = Math.max(0, Number.parseInt(process.env.LIME_TOTAL_ACCOUNT_CAPACITY || "0", 10) || 0);
 const SESSION_SECRET = process.env.SESSION_SECRET || "";
 const MAX_MB = Math.max(1, Math.min(Number(process.env.MAX_VIDEO_SIZE_MB || 500), 500));
 const MAX_BYTES = MAX_MB * 1024 * 1024;
-const POSTZEN = "https://api.postzen.dev";
+const LIME_API = "https://api.limesocial.io";
 const KURONAI_API = (process.env.KURONAI_API_BASE || "https://api.kuronaiapp.com").replace(/\/$/, "");
 const KURONAI_TG_ID = process.env.KURONAI_TG_ID || "";
 const KURONAI_MAX_BYTES = 60 * 1024 * 1024;
@@ -29,9 +29,8 @@ const KURONAI_MAX_BYTES = 60 * 1024 * 1024;
 const required = [
   ["UPSTASH_REDIS_REST_URL", process.env.UPSTASH_REDIS_REST_URL],
   ["UPSTASH_REDIS_REST_TOKEN", process.env.UPSTASH_REDIS_REST_TOKEN],
-  ["POSTZEN_API_KEY", POSTZEN_KEY],
   ["APP_URL", APP_URL],
-  ["SESSION_SECRET", SESSION_SECRET]
+  ["SESSION_SECRET", SESSION_SECRET.length >= 32 ? SESSION_SECRET : ""]
 ];
 const missing = required.filter(([, value]) => !value).map(([name]) => name);
 let redis = null;
@@ -57,9 +56,15 @@ app.use(helmet({
 app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
-const userKey = uid => `jvpostzen:user:${uid}`;
-const oauthKey = state => `jvpostzen:oauth:${state}`;
-const postsKey = uid => `jvpostzen:user:${uid}:history`;
+const userKey = uid => `jvpostzen:user:${uid}`; // Keep legacy key namespace so Telegram user records remain intact.
+const postsKey = uid => `jvpostzen:user:${uid}:history`; // Preserve existing publishing history.
+const LIME_ACTIVE_KEY = "jv:limesocial:connections";
+const LIME_PENDING_KEY = "jv:limesocial:pending";
+const limeUserKey = uid => `jv:limesocial:user:${uid}`;
+const limeOAuthKey = state => `jv:limesocial:oauth:${state}`;
+const keyFingerprint = keyRecord => crypto.createHash("sha256").update(keyRecord.key).digest("hex");
+const limeHealthKey = keyRecord => `jv:limesocial:key-health:${keyFingerprint(keyRecord)}`;
+const findConfiguredKey = record => configuredLimeKeys().find(item => keyFingerprint(item) === record?.keyFingerprint) || null;
 
 function getIdentity(req) {
   const uid = String(req.get("x-jv-telegram-uid") || "");
@@ -88,7 +93,7 @@ function getSession(req) {
 }
 
 // Video inspection only needs a previously verified, signed JV session. It must not
-// depend on Redis/PostZen readiness or call the remote JV bot for every video upload.
+// depend on Redis/Lime Social readiness or call the remote JV bot for every video upload.
 function requireSession(req, res, next) {
   const identity = getSession(req);
   if (!identity) return res.status(401).json({ error: "Your JV session is missing or expired. Sign in again, then select the video." });
@@ -118,6 +123,20 @@ async function ensureReady(_req, res, next) {
   if (missing.length) return res.status(503).json({ error: "Server configuration is incomplete.", missing });
   if (!redis) return res.status(503).json({ error: "Upstash Redis is not configured." });
   next();
+}
+
+async function rateLimitByUid(prefix, maxRequests, windowSeconds, req, res) {
+  const uid = req.identity?.uid;
+  if (!uid) return false;
+  const key = `jv:ratelimit:${prefix}:${uid}`;
+  const count = await redis.incr(key);
+  if (count === 1) await redis.expire(key, windowSeconds);
+  if (count > maxRequests) {
+    res.set("Retry-After", String(windowSeconds));
+    res.status(429).json({ error: "Too many requests. Wait briefly and try again." });
+    return true;
+  }
+  return false;
 }
 
 function safeTelegramProfile(verification) {
@@ -156,22 +175,48 @@ async function requireVerified(req, res, next) {
   }
 }
 
-async function postzen(pathname, options = {}) {
-  const response = await fetch(`${POSTZEN}${pathname}`, {
-    ...options,
-    headers: {
-      Authorization: `Bearer ${POSTZEN_KEY}`,
-      ...(options.body ? { "Content-Type": "application/json" } : {}),
-      ...(options.headers || {})
-    }
-  });
+async function limeRequest(keyRecord, pathname, options = {}) {
+  const { authScheme = "raw", ...fetchOptions } = options;
+  const health = await redis.get(limeHealthKey(keyRecord));
+  if (health?.blockedUntil && Number(health.blockedUntil) > Date.now()) {
+    const error = new Error("This Lime Social API key is temporarily unavailable.");
+    error.status = health.status || 503;
+    throw error;
+  }
+  let response;
+  try {
+    response = await fetch(`${LIME_API}${pathname}`, {
+      ...fetchOptions,
+      headers: {
+        Authorization: `${authScheme === "Bearer" ? "Bearer " : ""}${keyRecord.key}`,
+        ...(fetchOptions.body && !(fetchOptions.body instanceof FormData) ? { "Content-Type": "application/json" } : {}),
+        ...(fetchOptions.headers || {})
+      },
+      signal: fetchOptions.signal || AbortSignal.timeout(30000)
+    });
+  } catch (cause) {
+    await redis.set(limeHealthKey(keyRecord), { status: 503, blockedUntil: Date.now() + 30000 }, { ex: 30 }).catch(() => {});
+    const error = new Error("Lime Social could not be reached. This API key is temporarily paused.");
+    error.status = 503;
+    throw error;
+  }
   const raw = await response.text();
   let data;
-  try { data = raw ? JSON.parse(raw) : {}; } catch { data = { raw }; }
+  try { data = raw ? JSON.parse(raw) : {}; } catch { data = { message: "Provider returned an unreadable response." }; }
+  if (response.status === 429) {
+    await redis.set(limeHealthKey(keyRecord), { status: 429, blockedUntil: Date.now() + 60000 }, { ex: 60 });
+  } else if (response.status === 401) {
+    await redis.set(limeHealthKey(keyRecord), { status: 401, blockedUntil: Date.now() + 24 * 60 * 60 * 1000 }, { ex: 86400 });
+  } else if (response.status >= 500) {
+    await redis.set(limeHealthKey(keyRecord), { status: response.status, blockedUntil: Date.now() + 30000 }, { ex: 30 });
+  } else if (response.ok) {
+    await redis.del(limeHealthKey(keyRecord));
+  }
   if (!response.ok) {
-    const error = new Error(data.error || `PostZen API returned HTTP ${response.status}.`);
+    const message = data?.error?.message || data?.error || data?.message || `Lime Social returned HTTP ${response.status}.`;
+    const error = new Error(typeof message === "string" ? message : `Lime Social returned HTTP ${response.status}.`);
     error.status = response.status;
-    error.details = data;
+    error.providerCode = data?.error?.code || null;
     throw error;
   }
   return data;
@@ -179,23 +224,100 @@ async function postzen(pathname, options = {}) {
 
 async function ensureUser(uid) {
   let record = await redis.get(userKey(uid));
-  if (record?.postzenProfileId) return record;
-  const created = await postzen("/v1/profiles", {
-    method: "POST",
-    body: JSON.stringify({ name: `JV User ${uid}` })
-  });
-  const profileId = created.profile?._id || created.profile?.id || created._id || created.profileId;
-  if (!profileId) throw new Error("PostZen did not return a profile ID when creating the user's workspace.");
-  record = { telegramId: uid, postzenProfileId: profileId, createdAt: new Date().toISOString() };
-  await redis.set(userKey(uid), record);
+  if (!record) {
+    record = { telegramId: uid, createdAt: new Date().toISOString() };
+    await redis.set(userKey(uid), record);
+  }
+  // Legacy PostZen profile fields are deliberately retained as inert historical data.
   return record;
+}
+
+function configuredLimeKeys() {
+  return Object.entries(process.env).map(([name, value]) => {
+    const match = name.match(/^LIME_API_KEY_(\d+)$/);
+    return match && value?.trim() ? { id: Number(match[1]), key: value.trim() } : null;
+  }).filter(Boolean).sort((a, b) => a.id - b.id);
+}
+
+async function getLimeMe(keyRecord) {
+  const response = await limeRequest(keyRecord, "/v1/me");
+  return { data: response.data || {}, accounts: Array.isArray(response.accounts) ? response.accounts : [] };
+}
+
+async function chooseLimeKey() {
+  const keys = configuredLimeKeys();
+  if (!keys.length) {
+    const error = new Error("No Lime Social API keys are configured. Add LIME_API_KEY_1 and at least one valid key in Render.");
+    error.status = 503;
+    throw error;
+  }
+  const candidates = [];
+  for (const key of keys) {
+    try {
+      const me = await getLimeMe(key);
+      const tiktokCount = me.accounts.filter(a => a.platform === "tiktok").length;
+      candidates.push({ key, tiktokCount });
+    } catch (error) {
+      console.warn(`Lime Social key slot ${key.id} unavailable (HTTP ${error.status || 0}).`);
+    }
+  }
+  if (!candidates.length) {
+    const error = new Error("No configured Lime Social API key is currently usable. Check the keys and provider rate limits.");
+    error.status = 503;
+    throw error;
+  }
+  candidates.sort((a, b) => a.tiktokCount - b.tiktokCount || a.key.id - b.key.id);
+  return candidates[0].key;
+}
+
+async function getConnectionStats() {
+  const active = await redis.hlen(LIME_ACTIVE_KEY);
+  const now = Date.now();
+  await redis.zremrangebyscore(LIME_PENDING_KEY, 0, now);
+  const pending = await redis.zcard(LIME_PENDING_KEY);
+  const total = LIME_TOTAL_ACCOUNT_CAPACITY;
+  const providerKeysAvailable = configuredLimeKeys().length > 0;
+  return { totalCapacity: total, connected: active, pendingReservations: pending, availableSlots: Math.max(0, total - active - pending), providerKeysAvailable, acceptingConnections: total > 0 && providerKeysAvailable && active + pending < total };
+}
+
+const RESERVE_SLOT_LUA = `
+redis.call('ZREMRANGEBYSCORE', KEYS[2], 0, ARGV[1])
+if redis.call('HEXISTS', KEYS[1], ARGV[2]) == 1 or redis.call('EXISTS', KEYS[3]) == 1 then return 'USER_ALREADY_CONNECTED' end
+local active = redis.call('HLEN', KEYS[1])
+local pending = redis.call('ZCARD', KEYS[2])
+if tonumber(ARGV[3]) <= 0 or active + pending >= tonumber(ARGV[3]) then return 'FULL' end
+redis.call('ZADD', KEYS[2], ARGV[4], ARGV[5])
+redis.call('SET', KEYS[3], ARGV[5], 'EX', 600)
+return 'OK'
+`;
+
+async function reserveConnection(uid, state) {
+  const result = await redis.eval(RESERVE_SLOT_LUA, [LIME_ACTIVE_KEY, LIME_PENDING_KEY, limeUserKey(uid)], [String(Date.now()), uid, String(LIME_TOTAL_ACCOUNT_CAPACITY), String(Date.now() + 10 * 60 * 1000), state]);
+  return result;
+}
+
+async function releaseConnectionReservation(uid, state) {
+  await redis.zrem(LIME_PENDING_KEY, state);
+  const current = await redis.get(limeUserKey(uid));
+  if (current === state) await redis.del(limeUserKey(uid));
+  await redis.del(limeOAuthKey(state));
+}
+
+async function getUserConnection(uid) {
+  const value = await redis.hget(LIME_ACTIVE_KEY, uid);
+  if (!value) return null;
+  if (typeof value === "object") return value;
+  try { return JSON.parse(value); } catch { return null; }
 }
 
 app.get("/api/config", (_req, res) => {
   res.json({
     ready: missing.length === 0 && Boolean(redis),
     missing,
-    maxVideoSizeMB: MAX_MB,
+    maxVideoSizeMB: Math.min(MAX_MB, 100),
+    limeConfigured: configuredLimeKeys().length > 0,
+    limeKeyCount: configuredLimeKeys().length,
+    connectionCapacityConfigured: LIME_TOTAL_ACCOUNT_CAPACITY > 0,
     authentication: "existing-jv-bot-uid"
   });
 });
@@ -207,7 +329,7 @@ app.post("/api/auth/verify", ensureReady, requireVerified, async (req, res, next
       ok: true,
       uid: req.identity.uid,
       sessionToken: req.sessionToken,
-      profileReady: Boolean(record.postzenProfileId),
+      profileReady: true,
       telegramProfile: safeTelegramProfile(req.verification)
     });
   } catch (error) { next(error); }
@@ -216,7 +338,7 @@ app.post("/api/auth/verify", ensureReady, requireVerified, async (req, res, next
 app.get("/api/me", ensureReady, requireVerified, async (req, res, next) => {
   try {
     const record = await ensureUser(req.identity.uid);
-    res.json({ uid: req.identity.uid, profileReady: Boolean(record.postzenProfileId), sessionToken: req.sessionToken, telegramProfile: safeTelegramProfile(req.verification) });
+    res.json({ uid: req.identity.uid, profileReady: true, sessionToken: req.sessionToken, telegramProfile: safeTelegramProfile(req.verification) });
   } catch (error) { next(error); }
 });
 
@@ -308,69 +430,106 @@ app.get("/api/telegram/profile-photo", requireVerified, async (req, res) => {
   }
 });
 
-app.post("/api/connect/tiktok", ensureReady, requireVerified, async (req, res, next) => {
-  try {
-    const record = await ensureUser(req.identity.uid);
-    const redirectUrl = `${APP_URL}/oauth/postzen`;
-    const result = await postzen(`/v1/connect/tiktok?profileId=${encodeURIComponent(record.postzenProfileId)}&redirectUrl=${encodeURIComponent(redirectUrl)}`);
-    const authUrl = result.authUrl || result.url || result.connectUrl;
-    const state = result.state;
-    if (!authUrl || !state) throw new Error("PostZen did not return the TikTok authorization URL and state.");
-    await redis.set(oauthKey(String(state)), {
-      telegramId: req.identity.uid,
-      profileId: record.postzenProfileId
-    }, { ex: 600 });
-    res.json({ authUrl });
-  } catch (error) { next(error); }
+app.get("/api/connections/capacity", ensureReady, requireVerified, async (_req, res, next) => {
+  try { res.json(await getConnectionStats()); } catch (error) { next(error); }
 });
 
-app.get("/oauth/postzen", ensureReady, async (req, res) => {
+app.post("/api/connect/tiktok", ensureReady, requireVerified, async (req, res, next) => {
+  let state = "";
   try {
-    const { code, state, error } = req.query;
-    if (error || !code || !state) return res.redirect("/?connect=cancelled");
-    const stateRecord = await redis.get(oauthKey(String(state)));
-    if (!stateRecord?.profileId || !stateRecord?.telegramId) return res.redirect("/?connect=expired");
-    await postzen("/v1/connect/tiktok", {
+    if (await rateLimitByUid("connect", 5, 300, req, res)) return;
+    await ensureUser(req.identity.uid);
+    const existing = await getUserConnection(req.identity.uid);
+    if (existing) return res.status(409).json({ error: "This Telegram UID already has a connected TikTok account. Disconnect it before connecting another." });
+    state = crypto.randomBytes(32).toString("hex");
+    const reserved = await reserveConnection(req.identity.uid, state);
+    if (reserved === "FULL") return res.status(409).json({ error: "The shared TikTok connection pool is full." });
+    if (reserved === "USER_ALREADY_CONNECTED") return res.status(409).json({ error: "A TikTok connection or reservation already exists for this Telegram UID." });
+    const key = await chooseLimeKey();
+    const callback = new URL("/lime/callback", APP_URL);
+    callback.searchParams.set("state", state);
+    await redis.set(limeOAuthKey(state), { uid: req.identity.uid, keyId: key.id, keyFingerprint: keyFingerprint(key), createdAt: Date.now() }, { ex: 600 });
+    const result = await limeRequest(key, "/v1/account/connect", {
       method: "POST",
-      body: JSON.stringify({
-        code: String(code),
-        state: String(state),
-        profileId: stateRecord.profileId
-      })
+      authScheme: "Bearer",
+      body: JSON.stringify({ link_expiry_limit: 10, allowed_platforms: ["tiktok"], return_url: callback.toString() })
     });
-    await redis.del(oauthKey(String(state)));
-    res.redirect("/?connect=success");
+    const connectUrl = result?.data?.connect_url;
+    if (!connectUrl) throw new Error("Lime Social did not return a connection URL.");
+    res.json({ connectUrl, expiresAt: result.data.expires_at || null, capacity: await getConnectionStats() });
   } catch (error) {
-    console.error("PostZen OAuth callback:", error.details || error.message);
-    res.redirect("/?connect=failed");
+    if (state) {
+      const pending = await redis.get(limeOAuthKey(state));
+      await releaseConnectionReservation(pending?.uid || req.identity.uid, state).catch(() => {});
+    }
+    next(error);
+  }
+});
+
+app.get("/lime/callback", ensureReady, async (req, res) => {
+  const state = String(req.query.state || "");
+  if (!/^[a-f0-9]{64}$/.test(state)) return res.redirect("/?connect=invalid");
+  const pending = await redis.get(limeOAuthKey(state));
+  if (!pending?.uid || !Number.isInteger(Number(pending.keyId))) return res.redirect("/?connect=expired");
+  const finishFailure = async status => {
+    await releaseConnectionReservation(pending.uid, state).catch(() => {});
+    return res.redirect(`/?connect=${status}`);
+  };
+  if (String(req.query.result || "") !== "success" || String(req.query.platform || "") !== "tiktok") return finishFailure("failed");
+  const username = String(req.query.account || "").trim().replace(/^@/, "");
+  if (!username || username.length > 100) return finishFailure("failed");
+  try {
+    const key = findConfiguredKey(pending);
+    if (!key) return finishFailure("key-unavailable");
+    const me = await getLimeMe(key);
+    const account = me.accounts.find(item => item.platform === "tiktok" && String(item.username || "").replace(/^@/, "").toLowerCase() === username.toLowerCase());
+    if (!account) return finishFailure("not-confirmed");
+    const connection = { uid: pending.uid, keyId: key.id, keyFingerprint: keyFingerprint(key), platform: "tiktok", username: String(account.username).replace(/^@/, ""), canPost: account.can_post !== false, connectedAt: new Date().toISOString() };
+    const saveLua = `
+      if redis.call('GET', KEYS[3]) ~= ARGV[1] then return 'RESERVATION_EXPIRED' end
+      if redis.call('HEXISTS', KEYS[1], ARGV[2]) == 1 then return 'ALREADY_CONNECTED' end
+      redis.call('HSET', KEYS[1], ARGV[2], ARGV[3])
+      redis.call('ZREM', KEYS[2], ARGV[1])
+      redis.call('DEL', KEYS[3])
+      return 'OK'
+    `;
+    const saved = await redis.eval(saveLua, [LIME_ACTIVE_KEY, LIME_PENDING_KEY, limeUserKey(pending.uid)], [state, pending.uid, JSON.stringify(connection)]);
+    if (saved !== "OK") return finishFailure("expired");
+    await redis.del(limeOAuthKey(state));
+    return res.redirect("/?connect=success");
+  } catch (error) {
+    console.error("Lime Social callback verification failed:", error.status || "provider error");
+    return finishFailure("failed");
   }
 });
 
 app.get("/api/accounts", ensureReady, requireVerified, async (req, res, next) => {
   try {
-    const record = await ensureUser(req.identity.uid);
-    const data = await postzen(`/v1/accounts?profileId=${encodeURIComponent(record.postzenProfileId)}`);
-    const accounts = data.accounts || data.data || [];
-    await redis.set(`${userKey(req.identity.uid)}:accounts`, accounts);
-    res.json({ accounts });
+    const connection = await getUserConnection(req.identity.uid);
+    if (!connection) return res.json({ accounts: [] });
+    const key = findConfiguredKey(connection);
+    if (!key) return res.status(503).json({ error: "The API key assigned to this TikTok account is not configured." });
+    const me = await getLimeMe(key);
+    const account = me.accounts.find(item => item.platform === "tiktok" && String(item.username || "").replace(/^@/, "").toLowerCase() === String(connection.username).toLowerCase());
+    if (!account) {
+      await redis.hdel(LIME_ACTIVE_KEY, req.identity.uid);
+      return res.json({ accounts: [] });
+    }
+    res.json({ accounts: [{ id: `tiktok-${req.identity.uid}`, platform: "tiktok", username: connection.username, displayName: connection.username, canPost: account.can_post !== false }] });
   } catch (error) { next(error); }
 });
 
 app.delete("/api/accounts/:accountId", ensureReady, requireVerified, async (req, res, next) => {
   try {
-    const record = await ensureUser(req.identity.uid);
-    const accountId = String(req.params.accountId || "");
-    if (!/^[a-zA-Z0-9_-]{6,100}$/.test(accountId)) {
-      return res.status(400).json({ error: "Invalid TikTok account ID." });
-    }
-    // Verify ownership against this Telegram user's PostZen profile before disconnecting.
-    const data = await postzen(`/v1/accounts?profileId=${encodeURIComponent(record.postzenProfileId)}`);
-    const accounts = data.accounts || data.data || [];
-    const owned = accounts.some(account => String(account._id || account.id) === accountId);
-    if (!owned) return res.status(404).json({ error: "This account is not connected to your workspace." });
-    await postzen(`/v1/accounts/${encodeURIComponent(accountId)}`, { method: "DELETE" });
-    await redis.del(`${userKey(req.identity.uid)}:accounts`);
-    res.json({ ok: true });
+    if (await rateLimitByUid("disconnect", 10, 300, req, res)) return;
+    const connection = await getUserConnection(req.identity.uid);
+    if (!connection || req.params.accountId !== `tiktok-${req.identity.uid}`) return res.status(404).json({ error: "This TikTok account is not connected to your Telegram UID." });
+    const key = findConfiguredKey(connection);
+    if (!key) return res.status(503).json({ error: "The assigned Lime Social API key is unavailable. The connection was not released." });
+    const removed = await limeRequest(key, "/v1/account/remove", { method: "DELETE", body: JSON.stringify({ platform: "tiktok", username: connection.username }) });
+    if (removed?.success !== true) throw new Error("Lime Social did not confirm that the TikTok account was disconnected.");
+    await redis.hdel(LIME_ACTIVE_KEY, req.identity.uid);
+    res.json({ ok: true, capacity: await getConnectionStats() });
   } catch (error) { next(error); }
 });
 
@@ -523,8 +682,7 @@ app.post("/api/posts", ensureReady, requireVerified, upload.single("video"), asy
   let progressStreamStarted = false;
   const sendProgress = (stage, percent, message, extra = {}) => {
     if (!progressStreamStarted || res.destroyed || res.writableEnded) return;
-    const type = stage === "complete" ? "complete" : "progress";
-    res.write(`${JSON.stringify({ type, stage, percent: Math.max(0, Math.min(100, Math.round(percent))), message, ...extra })}\n`);
+    res.write(`${JSON.stringify({ type: stage === "complete" ? "complete" : "progress", stage, percent: Math.max(0, Math.min(100, Math.round(percent))), message, ...extra })}\n`);
   };
   const startProgressStream = () => {
     if (progressStreamStarted) return;
@@ -536,119 +694,94 @@ app.post("/api/posts", ensureReady, requireVerified, upload.single("video"), asy
     res.flushHeaders?.();
   };
   try {
+    if (await rateLimitByUid("publish", 10, 3600, req, res)) return;
     if (!file) return res.status(400).json({ error: "Choose a video file first." });
     if (req.body.musicRights !== "true" || req.body.videoRights !== "true") return res.status(400).json({ error: "Tick both the music copyright and video copyright boxes first." });
-    startProgressStream();
-    sendProgress("profile", 3, "Checking your private PostZen profile…");
-    const record = await ensureUser(req.identity.uid);
+    const connection = await getUserConnection(req.identity.uid);
+    if (!connection) return res.status(409).json({ error: "Connect a TikTok account before publishing." });
     const accountId = String(req.body.accountId || "");
-
-    sendProgress("account", 8, "Verifying the selected TikTok account…");
-    // Fetch fresh account ownership from PostZen; do not trust a browser-supplied account ID.
-    const accountResponse = await postzen(`/v1/accounts?profileId=${encodeURIComponent(record.postzenProfileId)}`);
-    const accounts = accountResponse.accounts || accountResponse.data || [];
-    const account = accounts.find(item => String(item._id || item.id) === accountId && item.platform === "tiktok");
-    if (!account) throw new Error("That TikTok account is not connected to this Telegram UID's PostZen profile.");
-
+    if (accountId !== `tiktok-${req.identity.uid}`) return res.status(403).json({ error: "The selected TikTok account does not belong to this Telegram UID." });
+    const key = findConfiguredKey(connection);
+    if (!key) return res.status(503).json({ error: "The Lime Social API key assigned to this account is missing." });
     const contentType = file.mimetype || "video/mp4";
-    const allowedTypes = new Set(["video/mp4", "video/mpeg", "video/quicktime", "video/avi", "video/x-msvideo", "video/webm", "video/x-m4v"]);
-    if (!allowedTypes.has(contentType)) throw new Error("Unsupported video type. Use MP4, MOV, WebM, AVI or MPEG.");
-
-    const mode = String(req.body.mode || "draft");
-    const userCaption = String(req.body.caption || "").trim();
-    const watermark = "#jvpersonaltest • Upload Method - @jv_60fps";
-    const caption = (userCaption ? `${userCaption}\n\n${watermark}` : watermark).slice(0, 2200);
-    const postBody = {
-      content: caption,
-      mediaItems: [],
-      platforms: [{
-        platform: "tiktok",
-        accountId,
-        settings: mode === "draft"
-          ? { uploadAsDraft: true }
-          : {
-              privacyLevel: ["publicToEveryone", "mutualFollowFriends", "selfOnly"].includes(req.body.privacyLevel) ? req.body.privacyLevel : "publicToEveryone",
-              allowComment: req.body.allowComment !== "false",
-              allowDuet: req.body.allowDuet !== "false",
-              allowStitch: req.body.allowStitch !== "false"
-            }
-      }]
-    };
-    if (mode === "publish") postBody.publishNow = true;
-    else if (mode === "schedule") {
+    const ext = path.extname(file.originalname || "").toLowerCase();
+    if (![".mp4", ".mov", ".avi"].includes(ext)) return res.status(400).json({ error: "Lime Social direct video upload supports MP4, MOV and AVI files." });
+    if (file.size > 100 * 1024 * 1024) return res.status(413).json({ error: "Lime Social documents a maximum direct video upload size of 100 MB." });
+    const mode = String(req.body.mode || "publish");
+    const caption = String(req.body.caption || "").trim().slice(0, 10000);
+    if (!caption) return res.status(400).json({ error: "Enter a caption before publishing." });
+    if (!["draft", "publish", "schedule"].includes(mode)) return res.status(400).json({ error: "Invalid publishing mode." });
+    let scheduledDate = null;
+    if (mode === "schedule") {
       const date = new Date(req.body.scheduledFor);
-      if (!Number.isFinite(date.getTime()) || date.getTime() < Date.now() + 60000) {
-        throw new Error("Choose a schedule time at least 60 seconds in the future.");
-      }
-      postBody.scheduledFor = date.toISOString();
-    } else if (mode === "draft") postBody.isDraft = true;
-    else throw new Error("Invalid publishing mode.");
+      if (!Number.isFinite(date.getTime()) || date.getTime() < Date.now() + 60000) return res.status(400).json({ error: "Choose a schedule time at least 60 seconds in the future." });
+      scheduledDate = date.toISOString().replace(/\.\d{3}Z$/, "Z");
+    }
+    startProgressStream();
+    sendProgress("account", 5, "Checking your connected TikTok account…");
+    const me = await getLimeMe(key);
+    const liveAccount = me.accounts.find(item => item.platform === "tiktok" && String(item.username || "").replace(/^@/, "").toLowerCase() === String(connection.username).toLowerCase());
+    if (!liveAccount) throw new Error("The connected TikTok account is no longer available in its Lime Social workspace.");
+    if (liveAccount.can_post === false) throw new Error("Lime Social reports that this TikTok account cannot currently publish. Reconnect it in Lime Social first.");
 
-    sendProgress("presign", 14, "Requesting a secure media upload from PostZen…");
-    const presign = await postzen("/v1/media/presign", {
-      method: "POST",
-      body: JSON.stringify({
-        filename: file.originalname,
-        contentType,
-        size: file.size,
-        profileId: record.postzenProfileId
-      })
-    });
-    if (!presign.uploadUrl || !presign.publicUrl) throw new Error("PostZen returned an incomplete media upload response.");
-
-    sendProgress("media_upload", 20, "Uploading the processed video to PostZen media storage…");
-    let uploadedBytes = 0;
-    let lastReportedPercent = -1;
-    const meter = new Transform({
-      transform(chunk, encoding, callback) {
-        uploadedBytes += chunk.length;
-        const transferPercent = Math.min(100, Math.round(uploadedBytes / Math.max(file.size, 1) * 100));
-        if (transferPercent >= lastReportedPercent + 1 || uploadedBytes >= file.size) {
-          lastReportedPercent = transferPercent;
-          const pct = 20 + (file.size ? (uploadedBytes / file.size) * 60 : 60);
-          sendProgress("media_upload", pct, `Transferring video to PostZen media storage · ${transferPercent}%`);
-        }
-        callback(null, chunk);
-      }
-    });
-    const stream = fs.createReadStream(file.path).pipe(meter);
-    const putResponse = await fetch(presign.uploadUrl, {
-      method: "PUT",
-      headers: { "Content-Type": contentType, "Content-Length": String(file.size) },
-      body: stream,
-      duplex: "half",
-      signal: AbortSignal.timeout(15 * 60 * 1000)
-    });
-    if (!putResponse.ok) throw new Error(`PostZen media upload failed with HTTP ${putResponse.status}.`);
-    postBody.mediaItems = [{ url: presign.publicUrl }];
-
-    sendProgress("publish", 85, "Media upload complete. Submitting the TikTok post request…");
-    const result = await postzen("/v1/posts", {
-      method: "POST",
-      body: JSON.stringify(postBody),
-      headers: { "x-request-id": crypto.randomUUID() }
-    });
-    const post = result.post || result.existingPost || result;
+    sendProgress("upload", 15, "Uploading the selected video directly to Lime Social. No JV video processing is running.");
+    const videoBlob = await fs.openAsBlob(file.path, { type: contentType });
+    const form = new FormData();
+    form.append("title", caption);
+    form.append("accounts[0][platform]", "tiktok");
+    form.append("accounts[0][username]", connection.username);
+    const privacy = ({ publicToEveryone: "PUBLIC_TO_EVERYONE", mutualFollowFriends: "MUTUAL_FOLLOW_FRIENDS", selfOnly: "SELF_ONLY" })[req.body.privacyLevel] || "PUBLIC_TO_EVERYONE";
+    form.append("accounts[0][privacy_level]", privacy);
+    form.append("accounts[0][disable_comment]", String(req.body.allowComment !== "true"));
+    form.append("accounts[0][disable_duet]", String(req.body.allowDuet !== "true"));
+    form.append("accounts[0][disable_stitch]", String(req.body.allowStitch !== "true"));
+    form.append("accounts[0][post_mode]", mode === "draft" ? "MEDIA_UPLOAD" : "DIRECT_POST");
+    if (scheduledDate) form.append("scheduled_date", scheduledDate);
+    form.append("mediaFile", videoBlob, file.originalname);
+    const result = await limeRequest(key, "/v1/post", { method: "POST", body: form, signal: AbortSignal.timeout(20 * 60 * 1000) });
+    const requestId = result?.data?.request_id;
+    if (!requestId) throw new Error("Lime Social did not return a publishing request ID.");
     const history = {
-      id: post._id || crypto.randomUUID(),
-      caption,
-      status: post.status || (mode === "draft" ? "draft_submitted" : mode === "schedule" ? "scheduled_submitted" : "publish_submitted"),
-      createdAt: new Date().toISOString(),
-      scheduledFor: post.scheduledFor || postBody.scheduledFor || null
+      id: String(requestId), requestId: String(requestId), provider: "lime", keyId: key.id, keyFingerprint: keyFingerprint(key), caption,
+      status: result?.data?.status || (mode === "schedule" ? "scheduled" : mode === "draft" ? "media_upload_queued" : "pending"),
+      createdAt: new Date().toISOString(), scheduledFor: scheduledDate
     };
     await redis.lpush(postsKey(req.identity.uid), JSON.stringify(history));
     await redis.ltrim(postsKey(req.identity.uid), 0, 49);
-    const response = { ok: true, post: history, message: result.message || "Your post request was accepted by PostZen." };
-    sendProgress("complete", 100, "PostZen accepted the TikTok post request.", { result: response });
+    const response = { ok: true, post: history, message: "Lime Social accepted the video upload and queued the TikTok job. Final delivery is asynchronous." };
+    sendProgress("complete", 100, "Lime Social accepted the TikTok publishing job.", { result: response });
     res.end();
   } catch (error) {
     if (progressStreamStarted) {
       if (!res.destroyed && !res.writableEnded) {
-        res.write(`${JSON.stringify({ type: "error", error: error.message || "PostZen publishing failed." })}\n`);
+        res.write(`${JSON.stringify({ type: "error", error: error.message || "Lime Social publishing failed." })}\n`);
         res.end();
       }
     } else next(error);
   } finally { if (file?.path) fs.promises.unlink(file.path).catch(() => {}); }
+});
+
+app.get("/api/posts/:requestId/status", ensureReady, requireVerified, async (req, res, next) => {
+  try {
+    if (await rateLimitByUid("status", 30, 60, req, res)) return;
+    const requestId = String(req.params.requestId || "");
+    if (!/^[a-zA-Z0-9_-]{1,100}$/.test(requestId)) return res.status(400).json({ error: "Invalid publishing request ID." });
+    const rawItems = await redis.lrange(postsKey(req.identity.uid), 0, 49);
+    const posts = rawItems.map(item => typeof item === "string" ? JSON.parse(item) : item);
+    const index = posts.findIndex(item => String(item.requestId || item.id) === requestId);
+    if (index < 0) return res.status(404).json({ error: "This publishing request does not belong to your account." });
+    const post = posts[index];
+    const key = findConfiguredKey(post);
+    if (!key) return res.status(503).json({ error: "The Lime Social key assigned to this post is not configured." });
+    const status = await limeRequest(key, `/v1/status/${encodeURIComponent(requestId)}`);
+    const data = status.data || status;
+    post.status = data.status || post.status;
+    post.statusCheckedAt = new Date().toISOString();
+    post.providerResults = Array.isArray(data.results) ? data.results : [];
+    posts[index] = post;
+    await redis.lset(postsKey(req.identity.uid), index, JSON.stringify(post));
+    res.json({ post, providerStatus: data });
+  } catch (error) { next(error); }
 });
 
 app.get("/api/history", ensureReady, requireVerified, async (req, res) => {
@@ -658,7 +791,7 @@ app.get("/api/history", ensureReady, requireVerified, async (req, res) => {
   });
 });
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, service: "JV PostZen" }));
+app.get("/api/health", (_req, res) => res.json({ ok: true, service: "JV Lime Social Studio" }));
 
 app.use((error, _req, res, _next) => {
   console.error(error.details || error.stack || error.message);
@@ -672,6 +805,6 @@ app.use((error, _req, res, _next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`JV PostZen server listening on ${PORT}`);
+  console.log(`JV Lime Social server listening on ${PORT}`);
   if (missing.length) console.warn("Missing environment variables:", missing.join(", "));
 });
