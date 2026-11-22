@@ -9,4 +9,4 @@ services:
       - key: NODE_VERSION
         value: 20
       - key: MAX_VIDEO_SIZE_MB
-        value: 500
+        value: 1024

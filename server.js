@@ -18,7 +18,7 @@ const PORT = Number(process.env.PORT || 3000);
 const APP_URL = (process.env.APP_URL || "").replace(/\/$/, "");
 const VERIFY_API = (process.env.JV_VERIFY_API_BASE || "https://google-colabe-bot.onrender.com").replace(/\/$/, "");
 const SESSION_SECRET = process.env.SESSION_SECRET || "";
-const MAX_MB = Math.max(1, Math.min(Number(process.env.MAX_VIDEO_SIZE_MB || 500), 500));
+const MAX_MB = Math.max(1, Math.min(Number(process.env.MAX_VIDEO_SIZE_MB || 1024), 1024));
 const MAX_BYTES = MAX_MB * 1024 * 1024;
 const VOHOLABS_API = (process.env.VOHOLABS_API_URL || "https://studio.voholabs.com/api/public/v1").replace(/\/$/, "");
 const VOHOLABS_API_KEY = process.env.VOHOLABS_API_KEY || "";
@@ -221,7 +221,7 @@ app.get("/api/config", (_req, res) => {
   res.json({
     ready: missing.length === 0 && Boolean(redis),
     missing,
-    maxVideoSizeMB: Math.min(MAX_MB, 100),
+    maxVideoSizeMB: MAX_MB,
     voholabsConfigured: Boolean(VOHOLABS_API_KEY),
     voholabsOwnerConfigured: Boolean(VOHOLABS_OWNER_TG_UID),
     authentication: "existing-jv-bot-uid"
@@ -355,6 +355,25 @@ function extractConnectAddress(payload) {
   return candidates.find(value => typeof value === "string" && value.trim()) || null;
 }
 
+// Voholabs returns a hosted connection URL, which can send the user onward to
+// TikTok's own OAuth consent page. Allow only HTTPS URLs on Voholabs or TikTok.
+// Never allow an arbitrary host supplied by an upstream API response.
+function isAllowedTikTokAuthorizationUrl(value) {
+  try {
+    const parsed = new URL(value);
+    const allowedHosts = new Set([
+      "studio.voholabs.com",
+      "voholabs.com",
+      "www.tiktok.com",
+      "tiktok.com"
+    ]);
+    return parsed.protocol === "https:" && !parsed.username && !parsed.password &&
+      (!parsed.port || parsed.port === "443") && allowedHosts.has(parsed.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
 app.get("/api/connections/capacity", ensureReady, requireVerified, requireVoholabsOwner, async (_req, res, next) => {
   try {
     const payload = await voholabsRequest("/integrations");
@@ -373,9 +392,13 @@ app.post("/api/connect/tiktok", ensureReady, requireVerified, requireVoholabsOwn
       console.error("Voholabs /social/tiktok returned an unexpected response shape:", JSON.stringify(result).slice(0, 700));
       return res.status(502).json({ error: "Voholabs did not return a TikTok authorization URL. Check that TikTok is available in your Voholabs workspace." });
     }
-    const parsed = new URL(connectUrl, "https://studio.voholabs.com");
-    if (parsed.protocol !== "https:" || !["studio.voholabs.com", "voholabs.com"].includes(parsed.hostname)) return res.status(502).json({ error: "Voholabs returned an unexpected authorization host." });
-    res.json({ connectUrl: parsed.toString() });
+    if (!isAllowedTikTokAuthorizationUrl(connectUrl)) {
+      let returnedHost = "invalid URL";
+      try { returnedHost = new URL(connectUrl).hostname; } catch {}
+      console.error("Blocked unexpected Voholabs TikTok authorization host:", returnedHost);
+      return res.status(502).json({ error: "Voholabs returned an unsupported TikTok authorization address. Check the Voholabs connection response." });
+    }
+    res.json({ connectUrl: new URL(connectUrl).toString() });
   } catch (error) { next(error); }
 });
 
@@ -433,10 +456,13 @@ app.get("/api/voholabs/connect/:network", ensureReady, requireVerified, requireV
     const result = await voholabsRequest(`/social/${encodeURIComponent(network)}`);
     const connectUrl = result?.url || result?.address || result?.connectUrl || result?.data?.url || result?.data?.address;
     if (!connectUrl || typeof connectUrl !== "string") return res.status(502).json({ error: "Voholabs did not return a channel connection address." });
-    let parsed;
-    try { parsed = new URL(connectUrl); } catch { return res.status(502).json({ error: "Voholabs returned an invalid connection address." }); }
-    if (parsed.protocol !== "https:" || parsed.hostname !== "studio.voholabs.com") return res.status(502).json({ error: "Voholabs returned an unexpected connection host." });
-    res.json({ connectUrl: parsed.toString() });
+    if (!isAllowedTikTokAuthorizationUrl(connectUrl)) {
+      let returnedHost = "invalid URL";
+      try { returnedHost = new URL(connectUrl).hostname; } catch {}
+      console.error("Blocked unexpected Voholabs authorization host:", returnedHost);
+      return res.status(502).json({ error: "Voholabs returned an unsupported authorization address." });
+    }
+    res.json({ connectUrl: new URL(connectUrl).toString() });
   } catch (error) { next(error); }
 });
 
