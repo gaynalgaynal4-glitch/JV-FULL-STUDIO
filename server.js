@@ -17,13 +17,12 @@ const app = express();
 const PORT = Number(process.env.PORT || 3000);
 const APP_URL = (process.env.APP_URL || "").replace(/\/$/, "");
 const VERIFY_API = (process.env.JV_VERIFY_API_BASE || "https://google-colabe-bot.onrender.com").replace(/\/$/, "");
-const LIME_TOTAL_ACCOUNT_CAPACITY = Math.max(0, Number.parseInt(process.env.LIME_TOTAL_ACCOUNT_CAPACITY || "0", 10) || 0);
 const SESSION_SECRET = process.env.SESSION_SECRET || "";
 const MAX_MB = Math.max(1, Math.min(Number(process.env.MAX_VIDEO_SIZE_MB || 500), 500));
 const MAX_BYTES = MAX_MB * 1024 * 1024;
-const LIME_API = (process.env.LIME_API_URL || "https://api.limesocial.io").replace(/\/$/, "");
 const VOHOLABS_API = (process.env.VOHOLABS_API_URL || "https://studio.voholabs.com/api/public/v1").replace(/\/$/, "");
 const VOHOLABS_API_KEY = process.env.VOHOLABS_API_KEY || "";
+const VOHOLABS_OWNER_TG_UID = String(process.env.VOHOLABS_OWNER_TG_UID || "").trim();
 const KURONAI_API = (process.env.KURONAI_API_BASE || "https://api.kuronaiapp.com").replace(/\/$/, "");
 const KURONAI_TG_ID = process.env.KURONAI_TG_ID || "";
 const KURONAI_MAX_BYTES = 60 * 1024 * 1024;
@@ -60,13 +59,6 @@ app.use(express.static(path.join(__dirname, "public")));
 
 const userKey = uid => `jvpostzen:user:${uid}`; // Keep legacy key namespace so Telegram user records remain intact.
 const postsKey = uid => `jvpostzen:user:${uid}:history`; // Preserve existing publishing history.
-const LIME_ACTIVE_KEY = "jv:limesocial:connections";
-const LIME_PENDING_KEY = "jv:limesocial:pending";
-const limeUserKey = uid => `jv:limesocial:user:${uid}`;
-const limeOAuthKey = state => `jv:limesocial:oauth:${state}`;
-const keyFingerprint = keyRecord => crypto.createHash("sha256").update(keyRecord.key).digest("hex");
-const limeHealthKey = keyRecord => `jv:limesocial:key-health:${keyFingerprint(keyRecord)}`;
-const findConfiguredKey = record => configuredLimeKeys().find(item => keyFingerprint(item) === record?.keyFingerprint) || null;
 
 function getIdentity(req) {
   const uid = String(req.get("x-jv-telegram-uid") || "");
@@ -95,7 +87,7 @@ function getSession(req) {
 }
 
 // Video inspection only needs a previously verified, signed JV session. It must not
-// depend on Redis/Lime Social readiness or call the remote JV bot for every video upload.
+// depend on Voholabs readiness or call the remote JV bot for every video upload.
 function requireSession(req, res, next) {
   const identity = getSession(req);
   if (!identity) return res.status(401).json({ error: "Your JV session is missing or expired. Sign in again, then select the video." });
@@ -177,62 +169,14 @@ async function requireVerified(req, res, next) {
   }
 }
 
-async function limeRequest(keyRecord, pathname, options = {}) {
-  const { authScheme = "raw", ...fetchOptions } = options;
-  const health = await redis.get(limeHealthKey(keyRecord));
-  if (health?.blockedUntil && Number(health.blockedUntil) > Date.now()) {
-    const error = new Error("This Lime Social API key is temporarily unavailable.");
-    error.status = health.status || 503;
-    throw error;
+function requireVoholabsOwner(req, res, next) {
+  if (!VOHOLABS_OWNER_TG_UID || !/^[0-9]{5,20}$/.test(VOHOLABS_OWNER_TG_UID)) {
+    return res.status(503).json({ error: "Set VOHOLABS_OWNER_TG_UID in Render to the Telegram UID that owns this Voholabs workspace." });
   }
-  let response;
-  try {
-    response = await fetch(`${LIME_API}${pathname}`, {
-      ...fetchOptions,
-      headers: {
-        Authorization: `${authScheme === "Bearer" ? "Bearer " : ""}${keyRecord.key}`,
-        ...(fetchOptions.body && !(fetchOptions.body instanceof FormData) ? { "Content-Type": "application/json" } : {}),
-        ...(fetchOptions.headers || {})
-      },
-      signal: fetchOptions.signal || AbortSignal.timeout(30000)
-    });
-  } catch (cause) {
-    // Distinguish DNS/TLS/timeout/network failures from an HTTP response. Never log
-    // request headers, API keys, or the full request options.
-    const code = String(cause?.cause?.code || cause?.code || cause?.name || "unknown");
-    console.error(`Lime Social network failure on ${pathname}: ${code}`);
-    await redis.set(limeHealthKey(keyRecord), { status: 503, blockedUntil: Date.now() + 10000 }, { ex: 10 }).catch(() => {});
-    const error = new Error(`Could not establish a connection to Lime Social (${code}).`);
-    error.status = 503;
-    error.networkFailure = true;
-    throw error;
+  if (String(req.identity?.uid) !== VOHOLABS_OWNER_TG_UID) {
+    return res.status(403).json({ error: "This Voholabs API key belongs to the workspace owner's Telegram account. Other users need their own Voholabs OAuth authorization." });
   }
-  const raw = await response.text();
-  let data;
-  try { data = raw ? JSON.parse(raw) : {}; } catch { data = { message: "Provider returned a non-JSON response." }; }
-  if (!response.ok) {
-    // Provider diagnostics are useful in Render logs, but redact the configured key
-    // and cap the response body to avoid leaking credentials or large HTML pages.
-    const safeBody = String(raw || "").replaceAll(keyRecord.key, "[REDACTED]").replace(/(authorization\s*[:=]\s*)[^,\s]+/ig, "$1[REDACTED]").slice(0, 700);
-    console.error(`Lime Social HTTP ${response.status} ${response.statusText || ""} on ${pathname}; content-type=${response.headers.get("content-type") || "unknown"}; response=${safeBody || "<empty>"}`);
-  }
-  if (response.status === 429) {
-    await redis.set(limeHealthKey(keyRecord), { status: 429, blockedUntil: Date.now() + 60000 }, { ex: 60 });
-  } else if (response.status === 401) {
-    await redis.set(limeHealthKey(keyRecord), { status: 401, blockedUntil: Date.now() + 24 * 60 * 60 * 1000 }, { ex: 86400 });
-  } else if (response.status >= 500) {
-    await redis.set(limeHealthKey(keyRecord), { status: response.status, blockedUntil: Date.now() + 30000 }, { ex: 30 });
-  } else if (response.ok) {
-    await redis.del(limeHealthKey(keyRecord));
-  }
-  if (!response.ok) {
-    const message = data?.error?.message || data?.error || data?.message || `Lime Social returned HTTP ${response.status}.`;
-    const error = new Error(typeof message === "string" ? message : `Lime Social returned HTTP ${response.status}.`);
-    error.status = response.status;
-    error.providerCode = data?.error?.code || null;
-    throw error;
-  }
-  return data;
+  next();
 }
 
 async function voholabsRequest(pathname, options = {}) {
@@ -273,93 +217,13 @@ async function ensureUser(uid) {
   return record;
 }
 
-function configuredLimeKeys() {
-  return Object.entries(process.env).map(([name, value]) => {
-    const match = name.match(/^LIME_API_KEY_(\d+)$/);
-    return match && value?.trim() ? { id: Number(match[1]), key: value.trim() } : null;
-  }).filter(Boolean).sort((a, b) => a.id - b.id);
-}
-
-async function getLimeMe(keyRecord) {
-  const response = await limeRequest(keyRecord, "/v1/me");
-  return { data: response.data || {}, accounts: Array.isArray(response.accounts) ? response.accounts : [] };
-}
-
-async function chooseLimeKey() {
-  const keys = configuredLimeKeys();
-  if (!keys.length) {
-    const error = new Error("No Lime Social API keys are configured. Add LIME_API_KEY_1 and at least one valid key in Render.");
-    error.status = 503;
-    throw error;
-  }
-  const candidates = [];
-  for (const key of keys) {
-    try {
-      const me = await getLimeMe(key);
-      const tiktokCount = me.accounts.filter(a => a.platform === "tiktok").length;
-      candidates.push({ key, tiktokCount });
-    } catch (error) {
-      console.warn(`Lime Social key slot ${key.id} unavailable: ${error.networkFailure ? "network/TLS/timeout failure" : `HTTP ${error.status || 0}`}.`);
-    }
-  }
-  if (!candidates.length) {
-    const error = new Error("No configured Lime Social API key is currently usable. Check the keys and provider rate limits.");
-    error.status = 503;
-    throw error;
-  }
-  candidates.sort((a, b) => a.tiktokCount - b.tiktokCount || a.key.id - b.key.id);
-  return candidates[0].key;
-}
-
-async function getConnectionStats() {
-  const active = await redis.hlen(LIME_ACTIVE_KEY);
-  const now = Date.now();
-  await redis.zremrangebyscore(LIME_PENDING_KEY, 0, now);
-  const pending = await redis.zcard(LIME_PENDING_KEY);
-  const total = LIME_TOTAL_ACCOUNT_CAPACITY;
-  const providerKeysAvailable = configuredLimeKeys().length > 0;
-  return { totalCapacity: total, connected: active, pendingReservations: pending, availableSlots: Math.max(0, total - active - pending), providerKeysAvailable, acceptingConnections: total > 0 && providerKeysAvailable && active + pending < total };
-}
-
-const RESERVE_SLOT_LUA = `
-redis.call('ZREMRANGEBYSCORE', KEYS[2], 0, ARGV[1])
-if redis.call('HEXISTS', KEYS[1], ARGV[2]) == 1 or redis.call('EXISTS', KEYS[3]) == 1 then return 'USER_ALREADY_CONNECTED' end
-local active = redis.call('HLEN', KEYS[1])
-local pending = redis.call('ZCARD', KEYS[2])
-if tonumber(ARGV[3]) <= 0 or active + pending >= tonumber(ARGV[3]) then return 'FULL' end
-redis.call('ZADD', KEYS[2], ARGV[4], ARGV[5])
-redis.call('SET', KEYS[3], ARGV[5], 'EX', 600)
-return 'OK'
-`;
-
-async function reserveConnection(uid, state) {
-  const result = await redis.eval(RESERVE_SLOT_LUA, [LIME_ACTIVE_KEY, LIME_PENDING_KEY, limeUserKey(uid)], [String(Date.now()), uid, String(LIME_TOTAL_ACCOUNT_CAPACITY), String(Date.now() + 10 * 60 * 1000), state]);
-  return result;
-}
-
-async function releaseConnectionReservation(uid, state) {
-  await redis.zrem(LIME_PENDING_KEY, state);
-  const current = await redis.get(limeUserKey(uid));
-  if (current === state) await redis.del(limeUserKey(uid));
-  await redis.del(limeOAuthKey(state));
-}
-
-async function getUserConnection(uid) {
-  const value = await redis.hget(LIME_ACTIVE_KEY, uid);
-  if (!value) return null;
-  if (typeof value === "object") return value;
-  try { return JSON.parse(value); } catch { return null; }
-}
-
 app.get("/api/config", (_req, res) => {
   res.json({
     ready: missing.length === 0 && Boolean(redis),
     missing,
     maxVideoSizeMB: Math.min(MAX_MB, 100),
-    limeConfigured: configuredLimeKeys().length > 0,
     voholabsConfigured: Boolean(VOHOLABS_API_KEY),
-    limeKeyCount: configuredLimeKeys().length,
-    connectionCapacityConfigured: LIME_TOTAL_ACCOUNT_CAPACITY > 0,
+    voholabsOwnerConfigured: Boolean(VOHOLABS_OWNER_TG_UID),
     authentication: "existing-jv-bot-uid"
   });
 });
@@ -472,106 +336,73 @@ app.get("/api/telegram/profile-photo", requireVerified, async (req, res) => {
   }
 });
 
-app.get("/api/connections/capacity", ensureReady, requireVerified, async (_req, res, next) => {
-  try { res.json(await getConnectionStats()); } catch (error) { next(error); }
-});
+// All social-channel operations now use the Voholabs Studio workspace.
+function unwrapArray(payload, keys) {
+  if (Array.isArray(payload)) return payload;
+  for (const key of keys) if (Array.isArray(payload?.[key])) return payload[key];
+  if (payload?.data) return unwrapArray(payload.data, keys);
+  return [];
+}
+function channelProvider(channel) {
+  return String(channel?.providerIdentifier || channel?.identifier || channel?.provider || channel?.platform || "").toLowerCase();
+}
+function isTikTokChannel(channel) {
+  const provider = channelProvider(channel);
+  return provider === "tiktok" || provider.startsWith("tiktok-") || String(channel?.name || "").toLowerCase().includes("tiktok");
+}
+function extractConnectAddress(payload) {
+  const candidates = [payload?.url, payload?.address, payload?.connectUrl, payload?.connect_url, payload?.redirectUrl, payload?.redirect_url, payload?.data?.url, payload?.data?.address, payload?.data?.connectUrl, payload?.data?.connect_url];
+  return candidates.find(value => typeof value === "string" && value.trim()) || null;
+}
 
-app.post("/api/connect/tiktok", ensureReady, requireVerified, async (req, res, next) => {
-  let state = "";
+app.get("/api/connections/capacity", ensureReady, requireVerified, requireVoholabsOwner, async (_req, res, next) => {
   try {
-    if (await rateLimitByUid("connect", 5, 300, req, res)) return;
-    await ensureUser(req.identity.uid);
-    const existing = await getUserConnection(req.identity.uid);
-    if (existing) return res.status(409).json({ error: "This Telegram UID already has a connected TikTok account. Disconnect it before connecting another." });
-    state = crypto.randomBytes(32).toString("hex");
-    const reserved = await reserveConnection(req.identity.uid, state);
-    if (reserved === "FULL") return res.status(409).json({ error: "The shared TikTok connection pool is full." });
-    if (reserved === "USER_ALREADY_CONNECTED") return res.status(409).json({ error: "A TikTok connection or reservation already exists for this Telegram UID." });
-    const key = await chooseLimeKey();
-    const callback = new URL("/lime/callback", APP_URL);
-    callback.searchParams.set("state", state);
-    await redis.set(limeOAuthKey(state), { uid: req.identity.uid, keyId: key.id, keyFingerprint: keyFingerprint(key), createdAt: Date.now() }, { ex: 600 });
-    const result = await limeRequest(key, "/v1/account/connect", {
-      method: "POST",
-      authScheme: "Bearer",
-      body: JSON.stringify({ link_expiry_limit: 10, allowed_platforms: ["tiktok"], return_url: callback.toString() })
-    });
-    const connectUrl = result?.data?.connect_url;
-    if (!connectUrl) throw new Error("Lime Social did not return a connection URL.");
-    res.json({ connectUrl, expiresAt: result.data.expires_at || null, capacity: await getConnectionStats() });
-  } catch (error) {
-    if (state) {
-      const pending = await redis.get(limeOAuthKey(state));
-      await releaseConnectionReservation(pending?.uid || req.identity.uid, state).catch(() => {});
-    }
-    next(error);
-  }
-});
-
-app.get("/lime/callback", ensureReady, async (req, res) => {
-  const state = String(req.query.state || "");
-  if (!/^[a-f0-9]{64}$/.test(state)) return res.redirect("/?connect=invalid");
-  const pending = await redis.get(limeOAuthKey(state));
-  if (!pending?.uid || !Number.isInteger(Number(pending.keyId))) return res.redirect("/?connect=expired");
-  const finishFailure = async status => {
-    await releaseConnectionReservation(pending.uid, state).catch(() => {});
-    return res.redirect(`/?connect=${status}`);
-  };
-  if (String(req.query.result || "") !== "success" || String(req.query.platform || "") !== "tiktok") return finishFailure("failed");
-  const username = String(req.query.account || "").trim().replace(/^@/, "");
-  if (!username || username.length > 100) return finishFailure("failed");
-  try {
-    const key = findConfiguredKey(pending);
-    if (!key) return finishFailure("key-unavailable");
-    const me = await getLimeMe(key);
-    const account = me.accounts.find(item => item.platform === "tiktok" && String(item.username || "").replace(/^@/, "").toLowerCase() === username.toLowerCase());
-    if (!account) return finishFailure("not-confirmed");
-    const connection = { uid: pending.uid, keyId: key.id, keyFingerprint: keyFingerprint(key), platform: "tiktok", username: String(account.username).replace(/^@/, ""), canPost: account.can_post !== false, connectedAt: new Date().toISOString() };
-    const saveLua = `
-      if redis.call('GET', KEYS[3]) ~= ARGV[1] then return 'RESERVATION_EXPIRED' end
-      if redis.call('HEXISTS', KEYS[1], ARGV[2]) == 1 then return 'ALREADY_CONNECTED' end
-      redis.call('HSET', KEYS[1], ARGV[2], ARGV[3])
-      redis.call('ZREM', KEYS[2], ARGV[1])
-      redis.call('DEL', KEYS[3])
-      return 'OK'
-    `;
-    const saved = await redis.eval(saveLua, [LIME_ACTIVE_KEY, LIME_PENDING_KEY, limeUserKey(pending.uid)], [state, pending.uid, JSON.stringify(connection)]);
-    if (saved !== "OK") return finishFailure("expired");
-    await redis.del(limeOAuthKey(state));
-    return res.redirect("/?connect=success");
-  } catch (error) {
-    console.error("Lime Social callback verification failed:", error.status || "provider error");
-    return finishFailure("failed");
-  }
-});
-
-app.get("/api/accounts", ensureReady, requireVerified, async (req, res, next) => {
-  try {
-    const connection = await getUserConnection(req.identity.uid);
-    if (!connection) return res.json({ accounts: [] });
-    const key = findConfiguredKey(connection);
-    if (!key) return res.status(503).json({ error: "The API key assigned to this TikTok account is not configured." });
-    const me = await getLimeMe(key);
-    const account = me.accounts.find(item => item.platform === "tiktok" && String(item.username || "").replace(/^@/, "").toLowerCase() === String(connection.username).toLowerCase());
-    if (!account) {
-      await redis.hdel(LIME_ACTIVE_KEY, req.identity.uid);
-      return res.json({ accounts: [] });
-    }
-    res.json({ accounts: [{ id: `tiktok-${req.identity.uid}`, platform: "tiktok", username: connection.username, displayName: connection.username, canPost: account.can_post !== false }] });
+    const payload = await voholabsRequest("/integrations");
+    const channels = unwrapArray(payload, ["integrations", "channels", "items", "results"]);
+    const tiktok = channels.filter(isTikTokChannel);
+    res.json({ totalCapacity: "Unlimited by Voholabs", connected: tiktok.length, availableSlots: "—", providerKeysAvailable: true, acceptingConnections: true, provider: "Voholabs Studio" });
   } catch (error) { next(error); }
 });
 
-app.delete("/api/accounts/:accountId", ensureReady, requireVerified, async (req, res, next) => {
+app.post("/api/connect/tiktok", ensureReady, requireVerified, requireVoholabsOwner, async (_req, res, next) => {
   try {
-    if (await rateLimitByUid("disconnect", 10, 300, req, res)) return;
-    const connection = await getUserConnection(req.identity.uid);
-    if (!connection || req.params.accountId !== `tiktok-${req.identity.uid}`) return res.status(404).json({ error: "This TikTok account is not connected to your Telegram UID." });
-    const key = findConfiguredKey(connection);
-    if (!key) return res.status(503).json({ error: "The assigned Lime Social API key is unavailable. The connection was not released." });
-    const removed = await limeRequest(key, "/v1/account/remove", { method: "DELETE", body: JSON.stringify({ platform: "tiktok", username: connection.username }) });
-    if (removed?.success !== true) throw new Error("Lime Social did not confirm that the TikTok account was disconnected.");
-    await redis.hdel(LIME_ACTIVE_KEY, req.identity.uid);
-    res.json({ ok: true, capacity: await getConnectionStats() });
+    if (await rateLimitByUid("voholabs-connect", 5, 300, _req, res)) return;
+    const result = await voholabsRequest("/social/tiktok");
+    const connectUrl = extractConnectAddress(result);
+    if (!connectUrl) {
+      console.error("Voholabs /social/tiktok returned an unexpected response shape:", JSON.stringify(result).slice(0, 700));
+      return res.status(502).json({ error: "Voholabs did not return a TikTok authorization URL. Check that TikTok is available in your Voholabs workspace." });
+    }
+    const parsed = new URL(connectUrl, "https://studio.voholabs.com");
+    if (parsed.protocol !== "https:" || !["studio.voholabs.com", "voholabs.com"].includes(parsed.hostname)) return res.status(502).json({ error: "Voholabs returned an unexpected authorization host." });
+    res.json({ connectUrl: parsed.toString() });
+  } catch (error) { next(error); }
+});
+
+app.get("/api/accounts", ensureReady, requireVerified, requireVoholabsOwner, async (_req, res, next) => {
+  try {
+    const payload = await voholabsRequest("/integrations");
+    const channels = unwrapArray(payload, ["integrations", "channels", "items", "results"]);
+    const accounts = channels.filter(isTikTokChannel).map(channel => ({
+      id: String(channel.id || channel._id || ""),
+      platform: "tiktok",
+      username: channel.username || channel.handle || channel.name || "TikTok account",
+      displayName: channel.name || channel.displayName || channel.username || "TikTok account",
+      avatarUrl: channel.picture || channel.avatar || channel.avatarUrl || null,
+      canPost: channel.disabled !== true && channel.connected !== false,
+      providerIdentifier: channelProvider(channel)
+    })).filter(channel => channel.id);
+    res.json({ accounts, workspace: "Voholabs Studio" });
+  } catch (error) { next(error); }
+});
+
+app.delete("/api/accounts/:accountId", ensureReady, requireVerified, requireVoholabsOwner, async (req, res, next) => {
+  try {
+    if (await rateLimitByUid("voholabs-disconnect", 10, 300, req, res)) return;
+    const id = String(req.params.accountId || "");
+    if (!/^[a-zA-Z0-9_-]{5,100}$/.test(id)) return res.status(400).json({ error: "Invalid Voholabs channel ID." });
+    await voholabsRequest(`/integrations/${encodeURIComponent(id)}`, { method: "DELETE" });
+    res.json({ ok: true });
   } catch (error) { next(error); }
 });
 
@@ -585,23 +416,21 @@ const upload = multer({
 
 // Voholabs Studio public API proxy. The API key remains server-side; the browser
 // only receives data returned by these authenticated, Telegram-verified routes.
-app.get("/api/voholabs/status", ensureReady, requireVerified, async (_req, res, next) => {
+app.get("/api/voholabs/status", ensureReady, requireVerified, requireVoholabsOwner, async (_req, res, next) => {
   try { res.json(await voholabsRequest("/is-connected")); } catch (error) { next(error); }
 });
 
-app.get("/api/voholabs/channels", ensureReady, requireVerified, async (req, res, next) => {
+app.get("/api/voholabs/channels", ensureReady, requireVerified, requireVoholabsOwner, async (req, res, next) => {
   try {
-    const group = encodeURIComponent(req.identity.uid);
-    res.json(await voholabsRequest(`/integrations?group=${group}`));
+    res.json(await voholabsRequest("/integrations"));
   } catch (error) { next(error); }
 });
 
-app.get("/api/voholabs/connect/:network", ensureReady, requireVerified, async (req, res, next) => {
+app.get("/api/voholabs/connect/:network", ensureReady, requireVerified, requireVoholabsOwner, async (req, res, next) => {
   try {
     const network = String(req.params.network || "").toLowerCase();
     if (!/^[a-z0-9-]{2,32}$/.test(network)) return res.status(400).json({ error: "Invalid social network." });
-    const group = encodeURIComponent(req.identity.uid);
-    const result = await voholabsRequest(`/social/${encodeURIComponent(network)}?group=${group}`);
+    const result = await voholabsRequest(`/social/${encodeURIComponent(network)}`);
     const connectUrl = result?.url || result?.address || result?.connectUrl || result?.data?.url || result?.data?.address;
     if (!connectUrl || typeof connectUrl !== "string") return res.status(502).json({ error: "Voholabs did not return a channel connection address." });
     let parsed;
@@ -611,7 +440,7 @@ app.get("/api/voholabs/connect/:network", ensureReady, requireVerified, async (r
   } catch (error) { next(error); }
 });
 
-app.post("/api/voholabs/upload", ensureReady, requireVerified, upload.single("file"), async (req, res, next) => {
+app.post("/api/voholabs/upload", ensureReady, requireVerified, requireVoholabsOwner, upload.single("file"), async (req, res, next) => {
   const file = req.file;
   try {
     if (!file) return res.status(400).json({ error: "Choose a media file first." });
@@ -622,7 +451,7 @@ app.post("/api/voholabs/upload", ensureReady, requireVerified, upload.single("fi
   finally { if (file?.path) fs.promises.unlink(file.path).catch(() => {}); }
 });
 
-app.get("/api/voholabs/posts", ensureReady, requireVerified, async (req, res, next) => {
+app.get("/api/voholabs/posts", ensureReady, requireVerified, requireVoholabsOwner, async (req, res, next) => {
   try {
     const query = new URLSearchParams();
     for (const name of ["startDate", "endDate"]) if (req.query[name]) query.set(name, String(req.query[name]));
@@ -631,7 +460,7 @@ app.get("/api/voholabs/posts", ensureReady, requireVerified, async (req, res, ne
   } catch (error) { next(error); }
 });
 
-app.post("/api/voholabs/posts", ensureReady, requireVerified, async (req, res, next) => {
+app.post("/api/voholabs/posts", ensureReady, requireVerified, requireVoholabsOwner, async (req, res, next) => {
   try {
     if (await rateLimitByUid("voholabs-post", 20, 3600, req, res)) return;
     if (!req.body || typeof req.body !== "object" || Array.isArray(req.body)) return res.status(400).json({ error: "A valid Voholabs post payload is required." });
@@ -775,111 +604,75 @@ app.delete("/api/process/jarvis/cleanup/:fileId", ensureReady, requireVerified, 
   } catch { res.status(204).end(); }
 });
 
-app.post("/api/posts", ensureReady, requireVerified, upload.single("video"), async (req, res, next) => {
+app.post("/api/posts", ensureReady, requireVerified, requireVoholabsOwner, upload.single("video"), async (req, res, next) => {
   const file = req.file;
-  let progressStreamStarted = false;
-  const sendProgress = (stage, percent, message, extra = {}) => {
-    if (!progressStreamStarted || res.destroyed || res.writableEnded) return;
-    res.write(`${JSON.stringify({ type: stage === "complete" ? "complete" : "progress", stage, percent: Math.max(0, Math.min(100, Math.round(percent))), message, ...extra })}\n`);
-  };
-  const startProgressStream = () => {
-    if (progressStreamStarted) return;
-    progressStreamStarted = true;
-    res.status(200);
-    res.setHeader("Content-Type", "application/x-ndjson; charset=utf-8");
-    res.setHeader("Cache-Control", "no-store, no-transform");
-    res.setHeader("X-Accel-Buffering", "no");
-    res.flushHeaders?.();
-  };
   try {
-    if (await rateLimitByUid("publish", 10, 3600, req, res)) return;
+    if (await rateLimitByUid("voholabs-post", 10, 3600, req, res)) return;
     if (!file) return res.status(400).json({ error: "Choose a video file first." });
-    if (req.body.musicRights !== "true" || req.body.videoRights !== "true") return res.status(400).json({ error: "Tick both the music copyright and video copyright boxes first." });
-    const connection = await getUserConnection(req.identity.uid);
-    if (!connection) return res.status(409).json({ error: "Connect a TikTok account before publishing." });
+    if (req.body.musicRights !== "true" || req.body.videoRights !== "true") return res.status(400).json({ error: "Confirm that you have rights to the music and video first." });
     const accountId = String(req.body.accountId || "");
-    if (accountId !== `tiktok-${req.identity.uid}`) return res.status(403).json({ error: "The selected TikTok account does not belong to this Telegram UID." });
-    const key = findConfiguredKey(connection);
-    if (!key) return res.status(503).json({ error: "The Lime Social API key assigned to this account is missing." });
-    const contentType = file.mimetype || "video/mp4";
+    if (!/^[a-zA-Z0-9_-]{5,100}$/.test(accountId)) return res.status(400).json({ error: "Select a valid Voholabs TikTok channel." });
+    const channelsPayload = await voholabsRequest("/integrations");
+    const channels = unwrapArray(channelsPayload, ["integrations", "channels", "items", "results"]);
+    const channel = channels.find(item => String(item.id || item._id || "") === accountId && isTikTokChannel(item));
+    if (!channel) return res.status(403).json({ error: "That TikTok channel is not connected to the configured Voholabs workspace." });
     const ext = path.extname(file.originalname || "").toLowerCase();
-    if (![".mp4", ".mov", ".avi"].includes(ext)) return res.status(400).json({ error: "Lime Social direct video upload supports MP4, MOV and AVI files." });
-    if (file.size > 100 * 1024 * 1024) return res.status(413).json({ error: "Lime Social documents a maximum direct video upload size of 100 MB." });
+    if (ext !== ".mp4") return res.status(400).json({ error: "Voholabs TikTok video publishing requires an MP4 file." });
+    if (file.size > 1024 * 1024 * 1024) return res.status(413).json({ error: "Voholabs accepts MP4 videos up to 1 GB." });
     const mode = String(req.body.mode || "publish");
-    const caption = String(req.body.caption || "").trim().slice(0, 10000);
-    if (!caption) return res.status(400).json({ error: "Enter a caption before publishing." });
     if (!["draft", "publish", "schedule"].includes(mode)) return res.status(400).json({ error: "Invalid publishing mode." });
-    let scheduledDate = null;
+    const caption = String(req.body.caption || "").trim().slice(0, 2000);
+    if (!caption) return res.status(400).json({ error: "Enter a TikTok caption before publishing." });
+    let scheduledDate = new Date().toISOString();
     if (mode === "schedule") {
       const date = new Date(req.body.scheduledFor);
       if (!Number.isFinite(date.getTime()) || date.getTime() < Date.now() + 60000) return res.status(400).json({ error: "Choose a schedule time at least 60 seconds in the future." });
-      scheduledDate = date.toISOString().replace(/\.\d{3}Z$/, "Z");
+      scheduledDate = date.toISOString();
     }
-    startProgressStream();
-    sendProgress("account", 5, "Checking your connected TikTok account…");
-    const me = await getLimeMe(key);
-    const liveAccount = me.accounts.find(item => item.platform === "tiktok" && String(item.username || "").replace(/^@/, "").toLowerCase() === String(connection.username).toLowerCase());
-    if (!liveAccount) throw new Error("The connected TikTok account is no longer available in its Lime Social workspace.");
-    if (liveAccount.can_post === false) throw new Error("Lime Social reports that this TikTok account cannot currently publish. Reconnect it in Lime Social first.");
 
-    sendProgress("upload", 15, "Uploading the selected video directly to Lime Social. No JV video processing is running.");
-    const videoBlob = await fs.openAsBlob(file.path, { type: contentType });
-    const form = new FormData();
-    form.append("title", caption);
-    form.append("accounts[0][platform]", "tiktok");
-    form.append("accounts[0][username]", connection.username);
+    const videoBlob = await fs.openAsBlob(file.path, { type: file.mimetype || "video/mp4" });
+    const uploadForm = new FormData();
+    uploadForm.append("file", videoBlob, file.originalname || "video.mp4");
+    const uploaded = await voholabsRequest("/upload", { method: "POST", body: uploadForm, signal: AbortSignal.timeout(20 * 60 * 1000) });
+    const media = uploaded?.media || uploaded?.file || uploaded?.data?.media || uploaded?.data?.file || uploaded?.data || uploaded;
+    const mediaId = media?.id || media?._id || uploaded?.id || uploaded?.data?.id;
+    const mediaPath = media?.path || media?.url || uploaded?.path || uploaded?.url || uploaded?.data?.path || uploaded?.data?.url;
+    if (!mediaId || !mediaPath) {
+      console.error("Voholabs upload response did not contain media id/path:", JSON.stringify(uploaded).slice(0, 900));
+      return res.status(502).json({ error: "Voholabs accepted the upload but returned no usable media ID/path. Check the server log for the response shape." });
+    }
+
     const privacy = ({ publicToEveryone: "PUBLIC_TO_EVERYONE", mutualFollowFriends: "MUTUAL_FOLLOW_FRIENDS", selfOnly: "SELF_ONLY" })[req.body.privacyLevel] || "PUBLIC_TO_EVERYONE";
-    form.append("accounts[0][privacy_level]", privacy);
-    form.append("accounts[0][disable_comment]", String(req.body.allowComment !== "true"));
-    form.append("accounts[0][disable_duet]", String(req.body.allowDuet !== "true"));
-    form.append("accounts[0][disable_stitch]", String(req.body.allowStitch !== "true"));
-    form.append("accounts[0][post_mode]", mode === "draft" ? "MEDIA_UPLOAD" : "DIRECT_POST");
-    if (scheduledDate) form.append("scheduled_date", scheduledDate);
-    form.append("mediaFile", videoBlob, file.originalname);
-    const result = await limeRequest(key, "/v1/post", { method: "POST", body: form, signal: AbortSignal.timeout(20 * 60 * 1000) });
-    const requestId = result?.data?.request_id;
-    if (!requestId) throw new Error("Lime Social did not return a publishing request ID.");
-    const history = {
-      id: String(requestId), requestId: String(requestId), provider: "lime", keyId: key.id, keyFingerprint: keyFingerprint(key), caption,
-      status: result?.data?.status || (mode === "schedule" ? "scheduled" : mode === "draft" ? "media_upload_queued" : "pending"),
-      createdAt: new Date().toISOString(), scheduledFor: scheduledDate
+    const uploadToInbox = mode === "draft";
+    const settings = {
+      __type: channelProvider(channel) || "tiktok",
+      content_posting_method: uploadToInbox ? "UPLOAD" : "DIRECT_POST",
+      duet: req.body.allowDuet === "true",
+      stitch: req.body.allowStitch === "true",
+      comment: req.body.allowComment === "true",
+      autoAddMusic: "no",
+      brand_organic_toggle: false,
+      brand_content_toggle: false
     };
+    if (!uploadToInbox) settings.privacy_level = privacy;
+    const postPayload = {
+      type: mode === "schedule" ? "schedule" : "now",
+      date: scheduledDate,
+      shortLink: false,
+      tags: [],
+      posts: [{
+        integration: { id: accountId },
+        value: [{ content: caption, video: [{ id: String(mediaId), path: String(mediaPath) }] }],
+        settings
+      }]
+    };
+    const created = await voholabsRequest("/posts", { method: "POST", body: JSON.stringify(postPayload), signal: AbortSignal.timeout(120000) });
+    const history = { id: String(created?.id || created?.post?.id || created?.data?.id || crypto.randomUUID()), provider: "voholabs", channelId: accountId, channelName: channel.name || channel.username || "TikTok", caption, status: mode === "schedule" ? "scheduled" : uploadToInbox ? "sent_to_tiktok_inbox" : "submitted", createdAt: new Date().toISOString(), scheduledFor: mode === "schedule" ? scheduledDate : null, response: created };
     await redis.lpush(postsKey(req.identity.uid), JSON.stringify(history));
     await redis.ltrim(postsKey(req.identity.uid), 0, 49);
-    const response = { ok: true, post: history, message: "Lime Social accepted the video upload and queued the TikTok job. Final delivery is asynchronous." };
-    sendProgress("complete", 100, "Lime Social accepted the TikTok publishing job.", { result: response });
-    res.end();
-  } catch (error) {
-    if (progressStreamStarted) {
-      if (!res.destroyed && !res.writableEnded) {
-        res.write(`${JSON.stringify({ type: "error", error: error.message || "Lime Social publishing failed." })}\n`);
-        res.end();
-      }
-    } else next(error);
-  } finally { if (file?.path) fs.promises.unlink(file.path).catch(() => {}); }
-});
-
-app.get("/api/posts/:requestId/status", ensureReady, requireVerified, async (req, res, next) => {
-  try {
-    if (await rateLimitByUid("status", 30, 60, req, res)) return;
-    const requestId = String(req.params.requestId || "");
-    if (!/^[a-zA-Z0-9_-]{1,100}$/.test(requestId)) return res.status(400).json({ error: "Invalid publishing request ID." });
-    const rawItems = await redis.lrange(postsKey(req.identity.uid), 0, 49);
-    const posts = rawItems.map(item => typeof item === "string" ? JSON.parse(item) : item);
-    const index = posts.findIndex(item => String(item.requestId || item.id) === requestId);
-    if (index < 0) return res.status(404).json({ error: "This publishing request does not belong to your account." });
-    const post = posts[index];
-    const key = findConfiguredKey(post);
-    if (!key) return res.status(503).json({ error: "The Lime Social key assigned to this post is not configured." });
-    const status = await limeRequest(key, `/v1/status/${encodeURIComponent(requestId)}`);
-    const data = status.data || status;
-    post.status = data.status || post.status;
-    post.statusCheckedAt = new Date().toISOString();
-    post.providerResults = Array.isArray(data.results) ? data.results : [];
-    posts[index] = post;
-    await redis.lset(postsKey(req.identity.uid), index, JSON.stringify(post));
-    res.json({ post, providerStatus: data });
+    res.json({ ok: true, post: history, message: mode === "draft" ? "Video sent to your TikTok inbox. Finish and publish it in the TikTok app." : mode === "schedule" ? "Video scheduled through Voholabs Studio." : "Video submitted to Voholabs Studio for TikTok publishing." });
   } catch (error) { next(error); }
+  finally { if (file?.path) fs.promises.unlink(file.path).catch(() => {}); }
 });
 
 app.get("/api/history", ensureReady, requireVerified, async (req, res) => {
@@ -889,7 +682,7 @@ app.get("/api/history", ensureReady, requireVerified, async (req, res) => {
   });
 });
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, service: "JV Studio with Voholabs API" }));
+app.get("/api/health", (_req, res) => res.json({ ok: true, service: "JV Studio · Voholabs" }));
 
 app.use((error, _req, res, _next) => {
   console.error(error.details || error.stack || error.message);

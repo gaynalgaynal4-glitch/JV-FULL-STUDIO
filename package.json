@@ -1,13 +1,12 @@
 {
-  "name": "jv-full-studio-lime-social",
+  "name": "jv-full-studio-voholabs",
   "version": "2.0.0",
   "private": true,
   "type": "module",
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "check": "node --check server.js && node --check public/app.js && node scripts/check-inline.js",
-    "test": "node scripts/test-invariants.js"
+    "check": "node --check server.js && node --check public/app.js && node scripts/check-inline.js"
   },
   "engines": {
     "node": ">=20"
