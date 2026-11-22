@@ -82,3 +82,17 @@ Do not delete the old Redis namespace during deployment. After verifying the new
 ## Validation and limitations
 
 Run `npm run check` for JavaScript and inline-script syntax checks, and `npm test` for 17 static migration/security invariants. These static checks do not replace live Redis concurrency tests or live Lime Social API tests. The included project test suite does not make live calls to Lime Social, Upstash, the JV verification service, or TikTok. Live publishing, actual plan entitlements, provider-side video handling, and the multipart nested-field serialization must be verified with valid credentials. The API documentation currently does not expose a numeric connected-account entitlement in `/v1/me`; the administrator must configure the aggregate limit accurately.
+
+
+## Voholabs Studio API integration
+
+The backend now includes a server-side Voholabs public API proxy. Configure `VOHOLABS_API_KEY` in Render using the key from Voholabs Studio → Settings → Connect Agent → API Key. The credential is sent only from the Node server in the raw `Authorization` header; it is never returned by `/api/config` or sent to browser code. The API base defaults to `https://studio.voholabs.com/api/public/v1`.
+
+Authenticated JV routes added:
+- `GET /api/voholabs/status` — validates the configured key.
+- `GET /api/voholabs/channels` — lists channels scoped with the verified Telegram UID as the Voholabs customer group.
+- `GET /api/voholabs/connect/:network` — returns the hosted Voholabs connection URL for a network.
+- `POST /api/voholabs/upload` — securely forwards a multipart media upload.
+- `GET /api/voholabs/posts` and `POST /api/voholabs/posts` — reads and creates posts through the public API.
+
+The pre-existing Lime Social routes and UI are retained for backwards compatibility; they have not been silently converted to Voholabs because Voholabs uses a different channel, media and post data model. Connect the new `/api/voholabs/*` routes to the desired dashboard workflow after validating the channel and media response shapes in your own Voholabs workspace.

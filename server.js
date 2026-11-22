@@ -22,6 +22,8 @@ const SESSION_SECRET = process.env.SESSION_SECRET || "";
 const MAX_MB = Math.max(1, Math.min(Number(process.env.MAX_VIDEO_SIZE_MB || 500), 500));
 const MAX_BYTES = MAX_MB * 1024 * 1024;
 const LIME_API = (process.env.LIME_API_URL || "https://api.limesocial.io").replace(/\/$/, "");
+const VOHOLABS_API = (process.env.VOHOLABS_API_URL || "https://studio.voholabs.com/api/public/v1").replace(/\/$/, "");
+const VOHOLABS_API_KEY = process.env.VOHOLABS_API_KEY || "";
 const KURONAI_API = (process.env.KURONAI_API_BASE || "https://api.kuronaiapp.com").replace(/\/$/, "");
 const KURONAI_TG_ID = process.env.KURONAI_TG_ID || "";
 const KURONAI_MAX_BYTES = 60 * 1024 * 1024;
@@ -233,6 +235,34 @@ async function limeRequest(keyRecord, pathname, options = {}) {
   return data;
 }
 
+async function voholabsRequest(pathname, options = {}) {
+  if (!VOHOLABS_API_KEY) {
+    const error = new Error("Voholabs is not configured. Add VOHOLABS_API_KEY to your server environment.");
+    error.status = 503;
+    throw error;
+  }
+  const headers = { Authorization: VOHOLABS_API_KEY, Accept: "application/json", ...(options.headers || {}) };
+  if (options.body && !(options.body instanceof FormData) && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
+  let response;
+  try {
+    response = await fetch(`${VOHOLABS_API}${pathname}`, { ...options, headers, signal: options.signal || AbortSignal.timeout(60000) });
+  } catch (cause) {
+    const error = new Error(`Could not connect to Voholabs Studio (${cause?.cause?.code || cause?.name || "network error"}).`);
+    error.status = 502;
+    throw error;
+  }
+  const raw = await response.text();
+  let data;
+  try { data = raw ? JSON.parse(raw) : {}; } catch { data = { message: "Voholabs returned a non-JSON response." }; }
+  if (!response.ok) {
+    const message = data?.message || data?.error?.message || data?.error || `Voholabs returned HTTP ${response.status}.`;
+    const error = new Error(typeof message === "string" ? message : `Voholabs returned HTTP ${response.status}.`);
+    error.status = response.status;
+    throw error;
+  }
+  return data;
+}
+
 async function ensureUser(uid) {
   let record = await redis.get(userKey(uid));
   if (!record) {
@@ -327,6 +357,7 @@ app.get("/api/config", (_req, res) => {
     missing,
     maxVideoSizeMB: Math.min(MAX_MB, 100),
     limeConfigured: configuredLimeKeys().length > 0,
+    voholabsConfigured: Boolean(VOHOLABS_API_KEY),
     limeKeyCount: configuredLimeKeys().length,
     connectionCapacityConfigured: LIME_TOTAL_ACCOUNT_CAPACITY > 0,
     authentication: "existing-jv-bot-uid"
@@ -550,6 +581,62 @@ const upload = multer({
     filename: (_req, file, cb) => cb(null, `${crypto.randomUUID()}-${path.basename(file.originalname).replace(/[^a-zA-Z0-9._-]/g, "_")}`)
   }),
   limits: { fileSize: MAX_BYTES, files: 1 }
+});
+
+// Voholabs Studio public API proxy. The API key remains server-side; the browser
+// only receives data returned by these authenticated, Telegram-verified routes.
+app.get("/api/voholabs/status", ensureReady, requireVerified, async (_req, res, next) => {
+  try { res.json(await voholabsRequest("/is-connected")); } catch (error) { next(error); }
+});
+
+app.get("/api/voholabs/channels", ensureReady, requireVerified, async (req, res, next) => {
+  try {
+    const group = encodeURIComponent(req.identity.uid);
+    res.json(await voholabsRequest(`/integrations?group=${group}`));
+  } catch (error) { next(error); }
+});
+
+app.get("/api/voholabs/connect/:network", ensureReady, requireVerified, async (req, res, next) => {
+  try {
+    const network = String(req.params.network || "").toLowerCase();
+    if (!/^[a-z0-9-]{2,32}$/.test(network)) return res.status(400).json({ error: "Invalid social network." });
+    const group = encodeURIComponent(req.identity.uid);
+    const result = await voholabsRequest(`/social/${encodeURIComponent(network)}?group=${group}`);
+    const connectUrl = result?.url || result?.address || result?.connectUrl || result?.data?.url || result?.data?.address;
+    if (!connectUrl || typeof connectUrl !== "string") return res.status(502).json({ error: "Voholabs did not return a channel connection address." });
+    let parsed;
+    try { parsed = new URL(connectUrl); } catch { return res.status(502).json({ error: "Voholabs returned an invalid connection address." }); }
+    if (parsed.protocol !== "https:" || parsed.hostname !== "studio.voholabs.com") return res.status(502).json({ error: "Voholabs returned an unexpected connection host." });
+    res.json({ connectUrl: parsed.toString() });
+  } catch (error) { next(error); }
+});
+
+app.post("/api/voholabs/upload", ensureReady, requireVerified, upload.single("file"), async (req, res, next) => {
+  const file = req.file;
+  try {
+    if (!file) return res.status(400).json({ error: "Choose a media file first." });
+    const form = new FormData();
+    form.append("file", await fs.openAsBlob(file.path, { type: file.mimetype || "application/octet-stream" }), file.originalname);
+    res.json(await voholabsRequest("/upload", { method: "POST", body: form, signal: AbortSignal.timeout(20 * 60 * 1000) }));
+  } catch (error) { next(error); }
+  finally { if (file?.path) fs.promises.unlink(file.path).catch(() => {}); }
+});
+
+app.get("/api/voholabs/posts", ensureReady, requireVerified, async (req, res, next) => {
+  try {
+    const query = new URLSearchParams();
+    for (const name of ["startDate", "endDate"]) if (req.query[name]) query.set(name, String(req.query[name]));
+    query.set("customer", String(req.identity.uid));
+    res.json(await voholabsRequest(`/posts?${query.toString()}`));
+  } catch (error) { next(error); }
+});
+
+app.post("/api/voholabs/posts", ensureReady, requireVerified, async (req, res, next) => {
+  try {
+    if (await rateLimitByUid("voholabs-post", 20, 3600, req, res)) return;
+    if (!req.body || typeof req.body !== "object" || Array.isArray(req.body)) return res.status(400).json({ error: "A valid Voholabs post payload is required." });
+    res.json(await voholabsRequest("/posts", { method: "POST", body: JSON.stringify(req.body) }));
+  } catch (error) { next(error); }
 });
 
 // Video preview and basic metadata are extracted locally in the browser.
@@ -802,7 +889,7 @@ app.get("/api/history", ensureReady, requireVerified, async (req, res) => {
   });
 });
 
-app.get("/api/health", (_req, res) => res.json({ ok: true, service: "JV Lime Social Studio" }));
+app.get("/api/health", (_req, res) => res.json({ ok: true, service: "JV Studio with Voholabs API" }));
 
 app.use((error, _req, res, _next) => {
   console.error(error.details || error.stack || error.message);
@@ -816,6 +903,6 @@ app.use((error, _req, res, _next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`JV Lime Social server listening on ${PORT}`);
+  console.log(`JV Studio server listening on ${PORT}`);
   if (missing.length) console.warn("Missing environment variables:", missing.join(", "));
 });
